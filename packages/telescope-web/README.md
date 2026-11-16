@@ -6,7 +6,7 @@ Part of the [`cloudflare/telescope`](https://github.com/cloudflare/telescope) mo
 
 ## Stack
 
-- **Astro v6** with `@astrojs/cloudflare` adapter
+- **Astro v7** with `@astrojs/cloudflare` adapter
 - **Cloudflare Workers** (D1, R2, AI bindings)
 - **Prisma v7** with `@prisma/adapter-d1` for D1 (SQLite)
 - **React v19** for interactive components

@@ -21,6 +21,7 @@ import type {
   LocalResultSummary,
   LocalScriptReference,
   SavedConfig,
+  ScenarioManifest,
   ScenarioStepResult,
 } from './types.js';
 
@@ -81,6 +82,63 @@ function isInside(root: string, filename: string): boolean {
       relative !== '..' &&
       !path.isAbsolute(relative))
   );
+}
+
+/** Validate every scoped step descriptor independently from the root manifest. */
+function validateScenarioArtifacts(
+  scenario: ScenarioManifest | undefined,
+  filenames: Iterable<string>,
+  read: (relative: string) => Buffer | null,
+): void {
+  const stepIds = new Set(scenario?.steps.map(step => step.id) ?? []);
+  for (const filename of filenames) {
+    if (!filename.startsWith('steps/')) continue;
+    const match = /^steps\/(\d{4})\//.exec(filename);
+    if (!match || !stepIds.has(match[1]))
+      throw new Error('Artifact references an undeclared scenario step');
+  }
+  for (const step of scenario?.steps ?? []) {
+    if ((step.kind === 'interaction') !== (step.metricScope === 'interval'))
+      throw new Error('Step kind and metric scope disagree');
+    for (const [relative, descriptor] of Object.entries(step.artifacts ?? {})) {
+      const filename = `${step.artifactBase}/${ArtifactPathSchema.parse(relative)}`;
+      ArtifactPathSchema.parse(filename);
+      const data = read(filename);
+      if (
+        !data ||
+        data.length !== descriptor.size ||
+        crypto.createHash('sha256').update(data).digest('hex') !==
+          descriptor.sha256
+      )
+        throw new Error(
+          `Step ${step.id} integrity validation failed for ${relative}`,
+        );
+    }
+    if (step.status === 'passed') {
+      for (const required of [
+        'metrics.json',
+        'resources.json',
+        'console.json',
+        'pageload.har',
+      ]) {
+        if (read(`${step.artifactBase}/${required}`) === null)
+          throw new Error(`Passed step ${step.id} is missing ${required}`);
+      }
+    }
+    const metricsBytes =
+      step.kind === 'interaction'
+        ? read(`${step.artifactBase}/metrics.json`)
+        : null;
+    if (metricsBytes) {
+      const metrics: unknown = JSON.parse(metricsBytes.toString('utf8'));
+      if (!metrics || typeof metrics !== 'object' || Array.isArray(metrics))
+        throw new Error(`Step ${step.id} has invalid metrics`);
+      if (Reflect.get(metrics, 'navigationTiming') != null)
+        throw new Error(
+          'Interaction metrics must not contain inherited navigation timing',
+        );
+    }
+  }
 }
 
 /** Owns a filesystem-backed local result library and its private control metadata. */
@@ -734,6 +792,24 @@ export class LocalStore {
     if (configs.filter(name => name.split('/').length === depth).length !== 1)
       throw new Error('ZIP contains ambiguous result roots');
     const prefix = configs[0].slice(0, -'config.json'.length);
+    const scenarioEntry = normalized.get(`${prefix}scenario.json`);
+    const scenario = scenarioEntry
+      ? ScenarioManifestSchema.parse(
+          JSON.parse(scenarioEntry.getData().toString('utf8')),
+        )
+      : undefined;
+    validateScenarioArtifacts(
+      scenario,
+      [...normalized.entries()]
+        .filter(
+          ([name, entry]) => !entry.isDirectory && name.startsWith(prefix),
+        )
+        .map(([name]) => name.slice(prefix.length)),
+      relative => {
+        const entry = normalized.get(`${prefix}${relative}`);
+        return entry && !entry.isDirectory ? entry.getData() : null;
+      },
+    );
     const configBytes = normalized.get(configs[0])!.getData();
     const config = JSON.parse(configBytes.toString('utf8')) as {
       url?: unknown;
@@ -855,13 +931,6 @@ export class LocalStore {
           ancestor = path.dirname(ancestor);
         }
       }
-      const scenario = fs.existsSync(path.join(stage, 'scenario.json'))
-        ? ScenarioManifestSchema.parse(
-            JSON.parse(
-              fs.readFileSync(path.join(stage, 'scenario.json'), 'utf8'),
-            ),
-          )
-        : undefined;
       if (fs.existsSync(path.join(stage, 'result.json'))) {
         const capture = ResultManifestSchema.parse(
           JSON.parse(fs.readFileSync(path.join(stage, 'result.json'), 'utf8')),
@@ -899,29 +968,6 @@ export class LocalStore {
           }
         }
       }
-      if (scenario)
-        for (const step of scenario.steps) {
-          if (step.status !== 'passed') continue;
-          for (const required of [
-            'metrics.json',
-            'resources.json',
-            'console.json',
-            'pageload.har',
-          ]) {
-            if (!fs.existsSync(path.join(stage, step.artifactBase, required)))
-              throw new Error(`Passed step ${step.id} is missing ${required}`);
-          }
-          const metrics = JSON.parse(
-            fs.readFileSync(
-              path.join(stage, step.artifactBase, 'metrics.json'),
-              'utf8',
-            ),
-          ) as { navigationTiming?: unknown };
-          if (step.kind === 'interaction' && metrics.navigationTiming)
-            throw new Error(
-              'Interaction metrics must not contain inherited navigation timing',
-            );
-        }
       atomicJson(this.recordPath('runs', testId), {
         testId,
         importHash: archiveHash,

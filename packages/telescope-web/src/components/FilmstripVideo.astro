@@ -1,27 +1,48 @@
 ---
 import { createResultStore } from '@/lib/storage/resultStore';
 import type { MetricsJson } from '@/lib/types/metrics';
+import type { ScenarioStepResult } from '@cloudflare/telescope/contracts';
 interface Props {
   testId: string;
   metrics: MetricsJson | null;
   artifactBase?: string;
+  step?: ScenarioStepResult;
+  fullSessionVideo?: string;
 }
-const { testId, metrics, artifactBase = '' } = Astro.props;
+const {
+  testId,
+  metrics,
+  artifactBase = '',
+  step,
+  fullSessionVideo,
+} = Astro.props;
 const store = createResultStore();
+const stepMedia = step?.media;
+const scoped = Boolean(artifactBase);
 let frameRate = 1;
 try {
-  const configObj = await store.get(testId, 'config.json');
-  if (configObj) {
-    const config = await configObj.json<{ options?: { frameRate?: number } }>();
-    frameRate = config?.options?.frameRate || 1;
+  if (!scoped) {
+    const configObj = await store.get(testId, 'config.json');
+    if (configObj) {
+      const config = await configObj.json<{
+        options?: { frameRate?: number };
+      }>();
+      frameRate = config?.options?.frameRate || 1;
+    }
   }
 } catch (error) {
   console.error('Error reading config.json:', error);
 }
-const fcpMs = metrics?.paintTiming?.find(p => p.name === 'first-contentful-paint')?.startTime;
+const fcpMs = metrics?.paintTiming?.find(
+  p => p.name === 'first-contentful-paint',
+)?.startTime;
 const lcpEntry = metrics?.largestContentfulPaint?.at(-1);
-const lcpMs = lcpEntry?.renderTime && lcpEntry.renderTime > 0 ? lcpEntry.renderTime : lcpEntry?.startTime;
-const layoutShifts = metrics?.layoutShifts?.filter(s => !s.hadRecentInput) || [];
+const lcpMs =
+  lcpEntry?.renderTime && lcpEntry.renderTime > 0
+    ? lcpEntry.renderTime
+    : lcpEntry?.startTime;
+const layoutShifts =
+  metrics?.layoutShifts?.filter(s => !s.hadRecentInput) || [];
 interface FilmstripFrame {
   filename: string;
   frameNum: number;
@@ -34,35 +55,87 @@ interface FilmstripFrame {
 }
 let filmstripFrames: FilmstripFrame[] = [];
 let videoUrl: string | null = null;
+let sessionVideoUrl: string | null = null;
+const unavailableReason =
+  scoped && stepMedia?.status !== 'available'
+    ? stepMedia?.reason || 'Aligned media is unavailable for this step.'
+    : null;
 try {
   const names = await store.list(testId);
+  const available = new Set(names);
   const framePrefix = `${artifactBase}filmstrip/`;
-  const frames = names.filter(name => name.startsWith(framePrefix) &&
-    !name.slice(framePrefix.length).includes('/') && /\.(jpg|png)$/.test(name)).map(name => {
-      const filename = name.slice(framePrefix.length);
-      const match = filename.match(/(\d+)\.(?:jpg|png)$/);
-      return { filename, frameNum: match ? Number.parseInt(match[1], 10) : 0,
-        url: `/api/tests/${testId}/${name}` };
-    }).sort((a, b) => a.frameNum - b.frameNum);
+  const frames = scoped
+    ? (stepMedia?.status === 'available' ? (stepMedia.frames ?? []) : [])
+        .filter(
+          frame =>
+            frame.path.startsWith(framePrefix) && available.has(frame.path),
+        )
+        .map((frame, index) => ({
+          filename: frame.path.slice(framePrefix.length),
+          frameNum: index + 1,
+          url: `/api/tests/${testId}/${frame.path}`,
+          ms: frame.ms,
+        }))
+    : names
+        .filter(
+          name =>
+            name.startsWith(framePrefix) &&
+            !name.slice(framePrefix.length).includes('/') &&
+            /\.(jpg|png)$/.test(name),
+        )
+        .map(name => {
+          const filename = name.slice(framePrefix.length);
+          const match = filename.match(/(\d+)\.(?:jpg|png)$/);
+          const frameNum = match ? Number.parseInt(match[1], 10) : 0;
+          return {
+            filename,
+            frameNum,
+            url: `/api/tests/${testId}/${name}`,
+            ms: Math.max(0, Math.floor(((frameNum - 1) * 1000) / frameRate)),
+          };
+        })
+        .sort((a, b) => a.frameNum - b.frameNum);
   filmstripFrames = frames.map(frame => {
-    const ms = Math.max(0, Math.floor(((frame.frameNum - 1) * 1000) / frameRate));
+    const ms = frame.ms;
     const timeLabel = ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
     const tolerance = 1000 / frameRate / 2;
-    return { ...frame, ms, timeLabel,
-      isFcp: fcpMs !== undefined && Math.abs(ms - fcpMs) < tolerance,
-      isLcp: lcpMs !== undefined && Math.abs(ms - lcpMs) < tolerance,
-      hasShift: layoutShifts.some(shift => Math.abs(ms - shift.startTime) < tolerance) };
+    return {
+      ...frame,
+      ms,
+      timeLabel,
+      isFcp: !scoped && fcpMs !== undefined && Math.abs(ms - fcpMs) < tolerance,
+      isLcp: !scoped && lcpMs !== undefined && Math.abs(ms - lcpMs) < tolerance,
+      hasShift:
+        !scoped &&
+        layoutShifts.some(shift => Math.abs(ms - shift.startTime) < tolerance),
+    };
   });
-  const video = names.find(name => name.startsWith(artifactBase) &&
-    !name.slice(artifactBase.length).includes('/') && name.endsWith('.webm'));
+  const video = scoped
+    ? stepMedia?.status === 'available' &&
+      stepMedia.videoPath?.startsWith(artifactBase) &&
+      available.has(stepMedia.videoPath)
+      ? stepMedia.videoPath
+      : undefined
+    : names.find(name => !name.includes('/') && name.endsWith('.webm'));
   if (video) videoUrl = `/api/tests/${testId}/${video}`;
+  if (
+    scoped &&
+    fullSessionVideo &&
+    !fullSessionVideo.includes('/') &&
+    fullSessionVideo.endsWith('.webm') &&
+    available.has(fullSessionVideo)
+  ) {
+    sessionVideoUrl = `/api/tests/${testId}/${fullSessionVideo}`;
+  }
 } catch (error) {
   console.error('Error loading filmstrip/video:', error);
 }
-
 ---
 
 <div class="filmstrip-video-container">
+  {unavailableReason && <p class="empty-state">{unavailableReason}</p>}
+  {scoped && stepMedia?.status === 'available' && stepMedia.alignment &&
+    <p>Frame times are relative to this step. Alignment uncertainty: ±{Math.ceil(stepMedia.alignment.uncertaintyMs)}ms.</p>}
   <section class="filmstrip-section">
     <h3>Filmstrip Timeline</h3>
     <div class="filmstrip-timeline">
@@ -94,7 +167,7 @@ try {
     </div>
   </section>
   <section class="video-section">
-    <h3>Page Load Recording</h3>
+    <h3>{scoped ? 'Step Recording' : 'Page Load Recording'}</h3>
     {
       videoUrl ? (
         <div class="video-container">
@@ -107,6 +180,11 @@ try {
       )
     }
   </section>
+  {sessionVideoUrl && <section class="video-section">
+    <h3>Full-session Recording</h3>
+    <p>Includes setup and all steps.</p>
+    <div class="video-container"><video src={sessionVideoUrl} controls preload="metadata" /></div>
+  </section>}
 </div>
 
 <style>

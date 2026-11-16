@@ -397,6 +397,20 @@ export interface TestScript {
 export type ScenarioStepStatus =
   'pending' | 'running' | 'passed' | 'failed' | 'skipped' | 'cancelled';
 
+/** Step-relative media with a measured alignment to the session recording. */
+export interface ScenarioStepMedia {
+  status: 'available' | 'unavailable';
+  reason?: string;
+  videoPath?: string;
+  frameRate?: number;
+  frames?: Array<{ path: string; ms: number }>;
+  alignment?: {
+    method: 'color-calibration';
+    uncertaintyMs: number;
+    videoStartMs: number;
+  };
+}
+
 /** Serializable outcome for an individual measured interval. */
 export interface ScenarioStepResult {
   id: string;
@@ -413,6 +427,7 @@ export interface ScenarioStepResult {
   documentTimeOrigin?: number;
   error?: string;
   artifacts?: Record<string, ArtifactDescriptor>;
+  media?: ScenarioStepMedia;
 }
 
 /** Shared multi-step artifact contract, independent of execution transport. */
@@ -425,7 +440,8 @@ export interface ScenarioManifest {
   durationMs: number;
   error?: string;
   coverStepId?: string;
-  video?: { path: string; startOffsetMs: number };
+  /** Full recording; a session-clock offset is omitted unless measured. */
+  video?: { path: string; startOffsetMs?: number };
   steps: ScenarioStepResult[];
 }
 

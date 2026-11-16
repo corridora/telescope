@@ -161,7 +161,7 @@ function expectedArtifact(filename: string): boolean {
   if (/^[^/]+\.webm$/.test(filename)) return true;
   if (/^filmstrip\/[^/]+\.(jpg|png)$/.test(filename)) return true;
   if (/^baseline\/[a-zA-Z0-9_./-]+\.json$/.test(filename)) return true;
-  return /^steps\/\d{4}\/((metrics|resources|console)\.json|pageload\.har|screenshot\.png|index\.html|filmstrip\/[^/]+\.(jpg|png))$/.test(
+  return /^steps\/\d{4}\/((metrics|resources|console)\.json|pageload\.har|screenshot\.png|index\.html|video\.webm|filmstrip\/[^/]+\.(jpg|png))$/.test(
     filename,
   );
 }
@@ -674,19 +674,61 @@ export function createLocalAgentController(options: {
         throw new Error(
           'Scenario outcome does not match its finished execution attempt',
         );
+      const stepIds = new Set(scenario.steps.map(step => step.id));
+      for (const filename of Object.keys(attempt.transfer.files)) {
+        if (!filename.startsWith('steps/')) continue;
+        const match = /^steps\/(\d{4})\//.exec(filename);
+        if (!match || !stepIds.has(match[1]))
+          throw new Error('Artifact references an undeclared scenario step');
+      }
       for (const step of scenario.steps) {
-        if (step.status !== 'passed') continue;
-        for (const filename of [
-          'metrics.json',
-          'resources.json',
-          'console.json',
-          'pageload.har',
-        ]) {
-          if (!attempt.transfer.files[`${step.artifactBase}/${filename}`])
-            throw new Error(`Passed step is missing ${filename}`);
+        if ((step.kind === 'interaction') !== (step.metricScope === 'interval'))
+          throw new Error('Step kind and metric scope disagree');
+        for (const [relative, expected] of Object.entries(
+          step.artifacts ?? {},
+        )) {
+          const filename = `${step.artifactBase}/${ArtifactPathSchema.parse(relative)}`;
+          if (!expectedArtifact(filename))
+            throw new Error(`Unknown step artifact: ${filename}`);
+          const transferred = attempt.transfer.files[filename];
+          if (
+            !transferred ||
+            transferred.size !== expected.size ||
+            transferred.sha256 !== expected.sha256
+          )
+            throw new Error(`Step ${step.id} integrity mismatch: ${relative}`);
+        }
+        if (step.status === 'passed') {
+          for (const filename of [
+            'metrics.json',
+            'resources.json',
+            'console.json',
+            'pageload.har',
+          ]) {
+            if (!attempt.transfer.files[`${step.artifactBase}/${filename}`])
+              throw new Error(`Passed step is missing ${filename}`);
+          }
+        }
+        const metricsPath = `${step.artifactBase}/metrics.json`;
+        if (
+          step.kind === 'interaction' &&
+          attempt.transfer.files[metricsPath]
+        ) {
+          const metrics = read(metricsPath);
+          if (!metrics || typeof metrics !== 'object' || Array.isArray(metrics))
+            throw new Error(`Step ${step.id} has invalid metrics`);
+          if (Reflect.get(metrics, 'navigationTiming') != null)
+            throw new Error(
+              'Interaction metrics must not contain inherited navigation timing',
+            );
         }
       }
-    }
+    } else if (
+      Object.keys(attempt.transfer.files).some(filename =>
+        filename.startsWith('steps/'),
+      )
+    )
+      throw new Error('Step artifacts require a scenario manifest');
     attempt.delivery_state = 'validating';
     persist();
     assertCurrent(attempt);

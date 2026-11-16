@@ -17,6 +17,8 @@ import ejs from 'ejs';
 
 import { ScenarioManifestSchema } from './contracts.js';
 import { DEFAULT_OPTIONS } from './defaultOptions.js';
+import { calibrateStepMedia, generateStepMedia } from './stepMedia.js';
+import type { StepMediaCalibration } from './stepMedia.js';
 import type { TestRunner } from './testRunner.js';
 import type {
   ArtifactDescriptor,
@@ -300,7 +302,18 @@ async function descriptors(
 ): Promise<Record<string, ArtifactDescriptor>> {
   const result: Record<string, ArtifactDescriptor> = {};
   for (const file of readdirSync(directory, { withFileTypes: true })) {
-    if (!file.isFile() || file.name.endsWith('.tmp')) continue;
+    if (file.isDirectory() && file.name === 'filmstrip') {
+      const frames = await descriptors(path.join(directory, file.name));
+      for (const [name, descriptor] of Object.entries(frames))
+        result[`filmstrip/${name}`] = descriptor;
+      continue;
+    }
+    if (
+      !file.isFile() ||
+      file.name.startsWith('.') ||
+      file.name.endsWith('.tmp')
+    )
+      continue;
     const absolute = path.join(directory, file.name);
     const digest = crypto.createHash('sha256');
     for await (const chunk of createReadStream(absolute)) digest.update(chunk);
@@ -366,6 +379,11 @@ export async function executeScript(
   let mainDocumentRequests = 0;
   let invariantError: Error | undefined;
   let failure: unknown;
+  let calibration: StepMediaCalibration = {
+    transitions: [],
+    reason: 'Recording calibration was not completed.',
+  };
+  let scriptBudgetStarted = started;
   let coverId: string | undefined;
   const suffix = crypto.randomUUID().replaceAll('-', '');
   const documentBinding = '__telescopeDocument' + suffix;
@@ -428,7 +446,7 @@ export async function executeScript(
   };
   const remaining = (timeout: number): number => {
     if (totalTimeout === undefined) return timeout;
-    const available = totalTimeout - (performance.now() - started);
+    const available = totalTimeout - (performance.now() - scriptBudgetStarted);
     if (available <= 0) throw new Error('Script total timeout exceeded');
     return Math.max(1, Math.min(timeout, Math.ceil(available)));
   };
@@ -454,6 +472,19 @@ export async function executeScript(
   context.on('page', extraPage);
   persist();
   try {
+    calibration = await calibrateStepMedia(
+      page,
+      started,
+      runner.options.signal,
+    );
+    if (calibration.cleanupFailed) {
+      await runner.closeContext();
+      throw new Error(
+        'Recording calibration cleanup failed before script setup.',
+      );
+    }
+    runner.throwIfAborted();
+    scriptBudgetStarted = performance.now();
     await context.exposeBinding(documentBinding, (source, value: unknown) => {
       if (
         source.page !== page ||
@@ -539,6 +570,10 @@ export async function executeScript(
       active = capture;
       captures.set(result.id, capture);
       result.startOffsetMs = start - started;
+      result.media = {
+        status: 'unavailable',
+        reason: 'Step media finalization was not completed.',
+      };
       let actionFinished: number | undefined;
       try {
         await boundedAction(
@@ -680,6 +715,7 @@ export async function executeScript(
           .relative(runner.paths.results, runner.videoRecordingFile)
           .split(path.sep)
           .join('/');
+        scenario.video = { path: runner.resultAssets.videoFile };
       }
       await Promise.all([...headerTasks]);
       finalizeStepArtifacts(
@@ -690,7 +726,47 @@ export async function executeScript(
         headerOwners,
         resourceEntries,
       );
+      try {
+        await generateStepMedia(
+          runner.paths.results,
+          runner.videoRecordingFile,
+          scenario.steps,
+          calibration,
+          runner.options.frameRate ?? DEFAULT_OPTIONS.frameRate,
+          runner.options.signal,
+        );
+      } catch {
+        for (const capture of captures.values())
+          capture.result.media = {
+            status: 'unavailable',
+            reason:
+              'Step media finalization failed; the full session recording is retained.',
+          };
+      }
       for (const capture of captures.values()) {
+        const diagnostics = capture.metrics?.capture;
+        if (diagnostics && typeof diagnostics === 'object') {
+          Object.assign(diagnostics, {
+            videoAlignment:
+              capture.result.media?.status === 'available'
+                ? 'color-calibration'
+                : 'unavailable',
+            ...(capture.result.media?.alignment
+              ? {
+                  videoAlignmentUncertaintyMs:
+                    capture.result.media.alignment.uncertaintyMs,
+                }
+              : {}),
+          });
+          atomicJSON(
+            path.join(
+              runner.paths.results,
+              capture.result.artifactBase,
+              'metrics.json',
+            ),
+            capture.metrics,
+          );
+        }
         capture.result.artifacts = await descriptors(
           path.join(runner.paths.results, capture.result.artifactBase),
         );

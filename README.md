@@ -46,13 +46,36 @@ telescope -u https://example.com -b chrome
 
 See [`packages/telescope/README.md`](./packages/telescope/README.md) for full documentation.
 
+Start the local run/results UI with a persistent workspace:
+
+```bash
+telescope local --resultsDir ./results
+```
+
+The local UI runs tests, saves reusable definitions, imports existing captures,
+and displays diagnostic results. Trusted multi-step scripts run with
+`telescope -u https://example.com --script ./journey.mjs --zip`.
+An outbound `telescope agent` can execute jobs for a local or hosted controller;
+the controller retains the accepted result. See the core documentation for
+enrollment, target policies, cancellation, and script provisioning.
+
+For container deployments, use the [Docker guide](./packages/telescope/docker/README.md).
+It covers a combined UI/runner, split services on one network, and isolated
+networks connected through explicit gateways.
+
 ---
 
 ## packages/telescope-web
 
 The Astro + Cloudflare Workers web application hosted at [telescopetest.io](https://telescopetest.io). Users upload Telescope ZIP results and view an interactive breakdown of metrics, waterfall, filmstrip, console logs, and more.
 
-**Stack:** Astro v6, Cloudflare Workers, D1 (SQLite via Prisma), R2, Workers AI
+The web application also initiates tests on enrolled agents, saves their artifacts
+on the web instance, and displays multi-step captures. Optional ZIP forwarding
+uses a durable outbox while preserving the local result. The
+[agent operator guide](./packages/telescope-web/docs/external-agents.md) and web
+README describe the administrator setup, migrations, and required secrets.
+
+**Stack:** Astro v7, Cloudflare Workers, D1 (SQLite via Prisma), R2, Workers AI
 
 ### Quick start
 
@@ -90,7 +113,7 @@ packages/
 ## CI
 
 - **`test.yml`** — runs on every push and PR (excluding `packages/telescope-web/**` changes). Builds `packages/telescope` and runs the full browser test suite inside the official Playwright Docker container.
-- **`deploy.yml`** — runs on push to `main` when `packages/telescope-web/**` changes. Applies D1 migrations, builds, and deploys to Cloudflare Workers.
+- **`deploy.yml`** — runs on push to `main` when the web app or its shared capture contracts change. Applies D1 migrations, builds, and deploys to Cloudflare Workers.
 
 ## npm Releases
 

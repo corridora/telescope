@@ -53,7 +53,7 @@ export function isExpectedTelescopeFile(filename: string): boolean {
   const step = /^steps\/\d{4}\/(.+)$/.exec(normalized);
   if (step) {
     return (
-      /^(metrics\.json|resources\.json|console\.json|pageload\.har|screenshot\.png)$/.test(
+      /^(metrics\.json|resources\.json|console\.json|pageload\.har|screenshot\.png|video\.webm)$/.test(
         step[1],
       ) || /^filmstrip\/[a-zA-Z0-9_.-]+\.(jpg|png)$/.test(step[1])
     );

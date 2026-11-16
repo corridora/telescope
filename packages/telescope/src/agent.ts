@@ -962,7 +962,7 @@ function safeArtifact(filename: string): boolean {
   if (/^[a-zA-Z0-9_.-]+\.webm$/.test(filename)) return true;
   if (/^filmstrip\/[a-zA-Z0-9_.-]+\.(jpg|png)$/.test(filename)) return true;
   if (/^baseline\/[a-zA-Z0-9_./-]+\.json$/.test(filename)) return true;
-  return /^steps\/\d{4}\/(metrics\.json|resources\.json|console\.json|pageload\.har|screenshot\.png|index\.html|filmstrip\/[a-zA-Z0-9_.-]+\.(jpg|png))$/.test(
+  return /^steps\/\d{4}\/(metrics\.json|resources\.json|console\.json|pageload\.har|screenshot\.png|index\.html|video\.webm|filmstrip\/[a-zA-Z0-9_.-]+\.(jpg|png))$/.test(
     filename,
   );
 }

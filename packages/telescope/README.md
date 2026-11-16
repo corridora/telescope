@@ -85,8 +85,11 @@ skipped after failure. Baseline analysis and multi-step execution are separate r
 
 Only trusted code should be provisioned. Local/remote UI selection uses files in
 `TELESCOPE_SCRIPTS_DIR`, pinned by ID and content hash; the UI does not accept script
-source or arbitrary executable paths. Per-step video/filmstrip timing is explicitly
-unavailable until calibrated; full-session media remains in the capture/archive.
+source or arbitrary executable paths. With FFmpeg installed, scripted captures
+attempt video alignment using a brief color calibration before unmeasured setup.
+Aligned step recordings and filmstrip frames include measured timing uncertainty.
+If calibration or processing fails, step media is marked unavailable; the original
+full-session recording remains in the capture/archive.
 Static scenario HTML opens directly from disk, and the standalone report processor
 also understands scenario captures.
 

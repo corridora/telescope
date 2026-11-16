@@ -74,6 +74,7 @@ export type {
   RunProgress,
   RunStatus,
   ScenarioManifest,
+  ScenarioStepMedia,
   ScenarioStepResult,
   ScenarioStepStatus,
   ScriptContext,

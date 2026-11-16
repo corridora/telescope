@@ -58,7 +58,7 @@ export const ScenarioManifestSchema = z
     video: z
       .object({
         path: ArtifactPathSchema,
-        startOffsetMs: z.number().nonnegative(),
+        startOffsetMs: z.number().finite().optional(),
       })
       .optional(),
     steps: z
@@ -87,6 +87,30 @@ export const ScenarioManifestSchema = z
           artifacts: z
             .record(ArtifactPathSchema, ArtifactDescriptorSchema)
             .optional(),
+          media: z
+            .object({
+              status: z.enum(['available', 'unavailable']),
+              reason: z.string().max(2048).optional(),
+              videoPath: ArtifactPathSchema.optional(),
+              frameRate: z.number().finite().positive().optional(),
+              frames: z
+                .array(
+                  z.object({
+                    path: ArtifactPathSchema,
+                    ms: z.number().finite().nonnegative(),
+                  }),
+                )
+                .max(1000)
+                .optional(),
+              alignment: z
+                .object({
+                  method: z.literal('color-calibration'),
+                  uncertaintyMs: z.number().finite().nonnegative(),
+                  videoStartMs: z.number().finite().nonnegative(),
+                })
+                .optional(),
+            })
+            .optional(),
         }),
       )
       .min(1)
@@ -98,14 +122,47 @@ export const ScenarioManifestSchema = z
       if (
         ids.has(step.id) ||
         step.artifactBase !== `steps/${step.id}` ||
-        step.order !== index
+        step.order !== index ||
+        (step.kind === 'interaction') !== (step.metricScope === 'interval')
       ) {
         context.addIssue({
           code: z.ZodIssueCode.custom,
           path: ['steps', index],
           message:
-            'Steps need unique ordered IDs and matching artifact directories',
+            'Steps need unique ordered IDs, matching artifact directories, and consistent metric scopes',
         });
+      }
+      if (step.media) {
+        const mediaPaths = [
+          step.media.videoPath,
+          ...(step.media.frames ?? []).map(frame => frame.path),
+        ].filter((value): value is string => value !== undefined);
+        if (
+          mediaPaths.some(
+            value => !value.startsWith(`${step.artifactBase}/`),
+          ) ||
+          (step.media.status === 'available' &&
+            (!step.media.alignment ||
+              mediaPaths.length === 0 ||
+              step.startOffsetMs === undefined ||
+              step.durationMs === undefined)) ||
+          mediaPaths.some(
+            value =>
+              !step.artifacts?.[value.slice(step.artifactBase.length + 1)],
+          ) ||
+          step.media.frames?.some(
+            (frame, frameIndex, frames) =>
+              (frameIndex > 0 && frame.ms < frames[frameIndex - 1].ms) ||
+              (step.durationMs !== undefined && frame.ms > step.durationMs),
+          )
+        ) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['steps', index, 'media'],
+            message:
+              'Step media needs scoped artifact descriptors, ordered frame times, and a measured alignment',
+          });
+        }
       }
       ids.add(step.id);
     }
@@ -141,5 +198,6 @@ export type {
   RunProgress,
   RunStatus,
   ScenarioManifest,
+  ScenarioStepMedia,
   ScenarioStepResult,
 } from './types.js';

@@ -340,7 +340,7 @@ if (!isUnsafe) {
             </div>
 
             <div slot="filmstrip-video">
-              {!scenarioError && <FilmstripVideo testId={testId} metrics={metrics} artifactBase={artifactBase} />}
+              {!scenarioError && <FilmstripVideo testId={testId} metrics={metrics} artifactBase={artifactBase} step={selectedStep} fullSessionVideo={scenario?.video?.path} />}
             </div>
 
             <div slot="resources">
