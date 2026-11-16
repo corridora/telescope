@@ -345,11 +345,10 @@ class TestRunner {
         }
       }
 
-      const tmpbrowser = await browserType.launch(
-        simpleOptions as Parameters<
-          typeof browserType.launchPersistentContext
-        >[1],
-      );
+      const tmpbrowser = await browserType.launch({
+        ...simpleOptions,
+        timeout: this.options.timeout ?? DEFAULT_OPTIONS.timeout,
+      } as Parameters<typeof browserType.launchPersistentContext>[1]);
       try {
         const tmpcontext = await tmpbrowser.newContext();
         const tmppage = await tmpcontext.newPage();
@@ -370,6 +369,7 @@ class TestRunner {
       this.paths['temporaryContext'],
       {
         ...this.selectedBrowser,
+        timeout: this.options.timeout ?? DEFAULT_OPTIONS.timeout,
         ...(this.options.allowedHosts
           ? { serviceWorkers: 'block' as const }
           : {}),

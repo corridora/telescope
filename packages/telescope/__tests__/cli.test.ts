@@ -1,4 +1,5 @@
 import { spawnSync } from 'child_process';
+import playwright from 'playwright';
 import { describe, it, expect, beforeAll } from 'vitest';
 
 import {
@@ -59,27 +60,53 @@ describe.each(browsers)('Basic Test: %s', browser => {
     expect(metrics?.navigationTiming.startTime).toBeGreaterThanOrEqual(0);
   });
 
-  it(`captures fIRS and fRHS only in chromium and webkit browsers`, async () => {
-    if (
-      ['chromium', 'webkit'].includes(
-        BrowserConfig.browserConfigs[browser].engine,
-      )
-    ) {
-      expect(
-        metrics?.navigationTiming.firstInterimResponseStart,
-      ).toBeGreaterThanOrEqual(0);
-      expect(
-        metrics?.navigationTiming.finalResponseHeadersStart,
-      ).toBeGreaterThanOrEqual(0);
-    } else {
-      expect(metrics?.navigationTiming).not.toHaveProperty(
+  it('preserves response timing fields supported by the selected browser', async () => {
+    const selected = BrowserConfig.browserConfigs[browser];
+    const probe = await playwright[selected.engine].launch({
+      headless: true,
+      timeout: 30_000,
+      ...('channel' in selected ? { channel: selected.channel } : {}),
+    });
+    try {
+      const page = await probe.newPage();
+      // Probe the installed engine/channel independently of Telescope's collector.
+      // `in` also detects timing fields inherited from PerformanceResourceTiming.
+      const supported = await page.evaluate(() => {
+        const prototype =
+          typeof PerformanceNavigationTiming === 'undefined'
+            ? undefined
+            : PerformanceNavigationTiming.prototype;
+        return {
+          firstInterimResponseStart: Boolean(
+            prototype && 'firstInterimResponseStart' in prototype,
+          ),
+          finalResponseHeadersStart: Boolean(
+            prototype && 'finalResponseHeadersStart' in prototype,
+          ),
+        };
+      });
+      expect(metrics?.navigationTiming).toBeTruthy();
+      for (const field of [
         'firstInterimResponseStart',
-      );
-      expect(metrics?.navigationTiming).not.toHaveProperty(
         'finalResponseHeadersStart',
-      );
+      ] as const) {
+        if (supported[field]) {
+          const value = metrics?.navigationTiming[field];
+          expect(value, `${browser} should preserve ${field}`).toBeTypeOf(
+            'number',
+          );
+          expect(Number.isFinite(value), `${field} should be finite`).toBe(
+            true,
+          );
+          expect(value).toBeGreaterThanOrEqual(0);
+        } else {
+          expect(metrics?.navigationTiming).not.toHaveProperty(field);
+        }
+      }
+    } finally {
+      await probe.close();
     }
-  });
+  }, 60_000);
 });
 
 describe.each(browsers)('Changed User Agent: %s', browser => {

@@ -1,5 +1,7 @@
 import { BrowserConfig } from '../src/browsers.js';
 import fs from 'fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, test } from 'vitest';
 import type { BrowserName } from '../src/types.js';
 
@@ -16,19 +18,40 @@ describe('Specific browser tests', () => {
     ).toThrow(Error);
   });
 
-  test('Passing Firefox preferences creates a user data dir and file', () => {
+  test('Firefox profile preparation isolates preferences for each run', () => {
     const options = {
       browser: 'firefox' as BrowserName,
       firefoxPrefs: { 'image.avif.enabled': false },
       url: '../tests/sandbox/index.html',
     };
-    const config = new BrowserConfig().getBrowserConfig('firefox', options);
-    expect(config && typeof config === 'object').toBe(true);
-    expect(fs.existsSync('./tmp')).toBe(true);
-    expect(fs.existsSync('./tmp/user.js')).toBe(true);
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'telescope-profiles-'));
+    try {
+      const profiles = new BrowserConfig();
+      const config = profiles.getBrowserConfig('firefox', options);
+      const second = profiles.getBrowserConfig('firefox', {
+        ...options,
+        firefoxPrefs: { 'image.avif.enabled': true },
+      });
+      expect(config.firefoxUserPrefs).toEqual(options.firefoxPrefs);
+      expect(second.firefoxUserPrefs).toEqual({ 'image.avif.enabled': true });
 
-    //clean up after ourselves
-    fs.rmSync('./tmp', { recursive: true, force: true });
+      const firstPath = path.join(root, 'first profile');
+      const secondPath = path.join(root, 'second profile');
+      profiles.createUserDataDir(config, firstPath);
+      profiles.addFirefoxPrefs(options.firefoxPrefs, firstPath);
+      profiles.createUserDataDir(second, secondPath);
+      profiles.addFirefoxPrefs(second.firefoxUserPrefs ?? {}, secondPath);
+
+      expect(
+        fs.readFileSync(path.join(firstPath, 'user.js'), 'utf8'),
+      ).toContain('user_pref("image.avif.enabled", false);');
+      expect(
+        fs.readFileSync(path.join(secondPath, 'user.js'), 'utf8'),
+      ).toContain('user_pref("image.avif.enabled", true);');
+      expect(config.firefoxUserPrefs).toEqual(options.firefoxPrefs);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   //test for default chrome flag add and remove
