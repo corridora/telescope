@@ -168,15 +168,34 @@ function ffmpeg(args: string[], timeoutMs: number): Promise<FFmpegOutput> {
 function colorAt(buffer: Buffer, frame: number): number {
   // Four pixels from the central half of the recording avoid letterbox edges.
   const start = frame * 12;
-  return CALIBRATION_COLORS.findIndex(color => {
-    for (let pixel = 0; pixel < 4; pixel++) {
-      for (let channel = 0; channel < 3; channel++) {
-        if (Math.abs(buffer[start + pixel * 3 + channel] - color[channel]) > 45)
-          return false;
-      }
+  const colors: number[] = [];
+  for (let pixel = 0; pixel < 4; pixel++) {
+    const red = buffer[start + pixel * 3];
+    const green = buffer[start + pixel * 3 + 1];
+    const blue = buffer[start + pixel * 3 + 2];
+    // Browser recording color profiles can change absolute RGB values (notably
+    // WebKit green). Require the same distinct chromatic signature at every
+    // pixel instead of confusing color conversion with a missing marker.
+    let color = -1;
+    if (Math.max(red, green, blue) >= 180) {
+      if (green - red >= 60 && green - blue >= 60) color = 0;
+      else if (blue - red >= 60 && blue - green >= 60) color = 1;
+      else if (
+        red - green >= 60 &&
+        blue - green >= 60 &&
+        Math.abs(red - blue) <= 80
+      )
+        color = 2;
+      else if (
+        red - blue >= 60 &&
+        green - blue >= 60 &&
+        Math.abs(red - green) <= 80
+      )
+        color = 3;
     }
-    return true;
-  });
+    colors.push(color);
+  }
+  return colors.every(color => color === colors[0]) ? colors[0] : -1;
 }
 
 async function locateCalibration(

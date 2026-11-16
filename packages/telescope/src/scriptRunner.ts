@@ -424,7 +424,15 @@ export async function executeScript(
       }
     }
   };
+  const rememberRequestHeader = (request: Request): boolean => {
+    const owner = requestOwners.get(request);
+    const id = request.headers()['x-telescope-id'];
+    if (!owner || !id) return false;
+    headerOwners.set(id, owner);
+    return true;
+  };
   const requestFinished = (request: Request): void => {
+    if (rememberRequestHeader(request)) return;
     const owner = requestOwners.get(request);
     if (!owner) return;
     const task = request
@@ -708,7 +716,15 @@ export async function executeScript(
     active = undefined;
     try {
       const video = page.video();
+      // A failed action can close the context after response headers arrive but
+      // before requestfinished/requestfailed is delivered. The injected route
+      // header is cached on the original Request, so preserve its start owner
+      // independently of completion events and browser protocol availability.
+      for (const request of requestOwners.keys())
+        rememberRequestHeader(request);
       await runner.closeContext();
+      for (const request of requestOwners.keys())
+        rememberRequestHeader(request);
       if (video) {
         runner.videoRecordingFile = await video.path();
         runner.resultAssets.videoFile = path
