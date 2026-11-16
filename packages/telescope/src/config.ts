@@ -151,8 +151,8 @@ export function normalizeCLIConfig(options: CLIOptions): LaunchOptions {
   // Handle device emulation
   // the 'device' in options is the name of the device to emulate provided by the user
   if (options.device) {
-    const playwrightDevice =
-      devices[options.device as keyof typeof devices];
+    config.deviceName = options.device;
+    const playwrightDevice = devices[options.device as keyof typeof devices];
     if (!playwrightDevice) {
       throw new Error(
         `Device "${options.device}" not found in Playwright device list`,

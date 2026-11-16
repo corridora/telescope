@@ -10,6 +10,8 @@ planning
 **/node_modules
 **/dist
 **/coverage
+**/__tests__
+**/tests
 **/.astro
 **/.wrangler
 results

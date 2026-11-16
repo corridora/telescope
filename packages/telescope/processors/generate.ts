@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as ejs from 'ejs';
 import { fileURLToPath } from 'url';
+import { renderScenarioReport } from '../src/scriptRunner.js';
 import type {
   HarEntry,
   LayoutShift,
@@ -748,6 +749,13 @@ function main() {
   console.log(`Loading data from ${basePath}...`);
 
   try {
+    if (fs.existsSync(path.join(basePath, 'scenario.json'))) {
+      renderScenarioReport(basePath);
+      const outputPath = path.join(basePath, 'visual_report.html');
+      fs.copyFileSync(path.join(basePath, 'index.html'), outputPath);
+      console.log(`Journey report generated: ${outputPath}`);
+      return;
+    }
     let metrics = loadJsonFile<Partial<Metrics>>(
       path.join(basePath, 'metrics.json'),
     );

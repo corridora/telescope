@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "testId": "2026_11_16_00_00_00_00000000-0000-4000-8000-000000000003",
+  "status": "running",
+  "startedAt": "2026-11-16T00:00:00.000Z",
+  "artifacts": {
+    "config.json": {
+      "size": 298,
+      "sha256": "c6d12510e77e601a123f63516fea96020fa56f37bfdbc5901265216705609fb4"
+    }
+  }
+}

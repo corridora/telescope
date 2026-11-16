@@ -18,6 +18,103 @@ Inside the test folder, the following files are added:
 - `screenshot.png` - A screenshot of the final page load
 - `/filmstrip` - A collection of screenshots during the page load that could be used for a filmstrip
 
+## Local workspace
+
+Start the installed run/results UI without cloud services:
+
+```sh
+telescope local --resultsDir ./results --port 4321
+```
+
+The workspace saves definitions, jobs, captures, and delivery history in that
+directory. Closing the browser leaves a job running; reopening the same directory
+retains prior results. Each rerun creates a new capture. Saved definitions omit
+credentials/cookies and sensitive headers; captured request data keeps its normal
+Telescope contents. `--no-open` prints the address without opening the host browser.
+
+The default listener is loopback. Container/private deployments can explicitly use
+`--host 0.0.0.0`; set a stable `TELESCOPE_LOCAL_TOKEN` (24–256 letters, digits,
+underscores, or hyphens) and allow intended hostnames with
+`TELESCOPE_ALLOWED_HOSTS`. Open the startup address containing the session token,
+or enter it on the workspace sign-in page. The token protects control requests and
+private media. Browser profiles and control metadata are kept under `.telescope/`
+and are excluded from exports.
+
+CLI/API runs can use the same library with `--resultsDir`. `result.json` records
+capture identity, outcome, and artifact integrity; incomplete/dry/failed captures
+are distinguished from passed runs. Failed API results include `testId` and
+`resultsPath` when a capture directory exists. Programmatic `signal` and
+`onProgress` options support cancellation and lifecycle reporting.
+
+## Multi-step scripts
+
+Use a trusted local ESM `.mjs`/`.js` file with named `steps` exports:
+
+```js
+export const steps = [
+  {
+    name: 'Open the page',
+    kind: 'navigation',
+    run: async ({ page, url }) => {
+      await page.goto(url);
+      await page.locator('body').waitFor();
+    },
+  },
+  {
+    name: 'Inspect the page',
+    kind: 'interaction',
+    run: async ({ page }) => {
+      await page.getByRole('heading').first().waitFor();
+    },
+  },
+];
+```
+
+```sh
+telescope https://example.com --script ./journey.mjs --html --zip
+```
+
+An optional exported `setup({ page, context, url })` runs before measurement.
+Callbacks define readiness; there is no implicit initial navigation or mandatory
+idle wait. Navigation steps commit one document, while interaction steps remain
+in their document. `--timeout` is the default action limit and `--scriptTimeout`
+caps the whole script. Scripts preserve browser state and save per-step metrics,
+requests, console, screenshots, and HARs under `steps/`, indexed by `scenario.json`.
+An interaction does not inherit navigation FCP/LCP/TTFB ratings. Later steps are
+skipped after failure. Baseline analysis and multi-step execution are separate runs.
+
+Only trusted code should be provisioned. Local/remote UI selection uses files in
+`TELESCOPE_SCRIPTS_DIR`, pinned by ID and content hash; the UI does not accept script
+source or arbitrary executable paths. Per-step video/filmstrip timing is explicitly
+unavailable until calibrated; full-session media remains in the capture/archive.
+Static scenario HTML opens directly from disk, and the standalone report processor
+also understands scenario captures.
+
+## Remote agents and ZIP forwarding
+
+The local workspace's **Agents** page or the hosted web UI can enroll an outbound
+agent. Save its one-time credential in a private file on the agent machine:
+
+```sh
+telescope agent --controller https://your-telescope-instance \
+  --tokenFile ./agent.token --allowHosts example.com,cdn.example.com \
+  --spoolDir ./agent-spool
+```
+
+The agent operator controls target/resource hostname access. Use
+`--allowInsecureHttp` only for an explicitly intended development controller.
+The controller owns accepted result files; the agent keeps a bounded temporary
+spool until durable receipt. Results remain accessible after removing the agent.
+Progress, cancellation, explicit retries, and delivery status are available in
+the controller UI. See the [Docker deployment guide](docker/README.md) and the
+[web application guide](../telescope-web/README.md) for deployment configuration.
+
+Optional `UPLOAD_FORWARD_URL` configuration forwards accepted original ZIP
+uploads/imports through a separate durable outbox. Forwarding preserves local
+results and has its own retries, review/retention policy, and administrative UI.
+New local or remote runs are not automatically exported and forwarded. Forwarding
+is disabled unless configured; see the web application guide for settings.
+
 ## Parameters
 
 A full list of parameters can be printed to the terminal by running `telescope --help`. Running `telescope` (or `npx @cloudflare/telescope`) with no arguments also prints the help message.

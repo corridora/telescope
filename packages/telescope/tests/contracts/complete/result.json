@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "testId": "2026_11_16_00_00_00_00000000-0000-4000-8000-000000000001",
+  "status": "passed",
+  "startedAt": "2026-11-16T00:00:00.000Z",
+  "artifacts": {
+    "config.json": {
+      "size": 298,
+      "sha256": "c6d12510e77e601a123f63516fea96020fa56f37bfdbc5901265216705609fb4"
+    },
+    "metrics.json": {
+      "size": 777,
+      "sha256": "82c4c14f7d39b78a7c657822b5c689445a7c95c4d6d21108bca18697dd563168"
+    },
+    "resources.json": {
+      "size": 3,
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+    },
+    "console.json": {
+      "size": 3,
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+    },
+    "pageload.har": {
+      "size": 466,
+      "sha256": "350ee43be6edc11730d3e10a7bb370c9fcf0bc16b0c0519a844115b294376ce6"
+    }
+  },
+  "finishedAt": "2026-11-16T00:00:01.000Z"
+}

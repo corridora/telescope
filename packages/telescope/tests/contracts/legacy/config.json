@@ -1,0 +1,16 @@
+{
+  "url": "http://fixture.invalid/",
+  "date": "2026-11-16T00:00:00.000Z",
+  "options": {
+    "url": "http://fixture.invalid/",
+    "browser": "firefox"
+  },
+  "browserConfig": {
+    "engine": "firefox",
+    "headless": true,
+    "viewport": {
+      "width": 1280,
+      "height": 720
+    }
+  }
+}

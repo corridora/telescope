@@ -1,0 +1,45 @@
+# Include alongside compose.shared-network.yml after enrolling an agent.
+services:
+  agent:
+    build:
+      context: ../../..
+      dockerfile: packages/telescope/Dockerfile
+    platform: linux/amd64
+    init: true
+    shm_size: 1gb
+    security_opt:
+      - seccomp=./seccomp_profile.json
+    command:
+      - agent
+      - --controller
+      - http://controller:4321
+      - --allowInsecureHttp
+      - --tokenFile
+      - /run/secrets/agent_token
+      - --allowHosts
+      - app
+      - --spoolDir
+      - /data/spool
+      - --pollInterval
+      - '3000'
+    environment:
+      HEADLESS: 'true'
+      RUNNING_IN_DOCKER: 'true'
+    secrets:
+      - agent_token
+    volumes:
+      - agent-spool:/data
+    networks: [execution]
+    depends_on:
+      controller:
+        condition: service_healthy
+      app:
+        condition: service_healthy
+    stop_grace_period: 30s
+
+volumes:
+  agent-spool:
+
+secrets:
+  agent_token:
+    file: ${TELESCOPE_AGENT_TOKEN_FILE:?Set TELESCOPE_AGENT_TOKEN_FILE to the enrolled agent credential file}

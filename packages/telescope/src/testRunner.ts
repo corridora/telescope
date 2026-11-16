@@ -8,10 +8,13 @@ import {
   writeFileSync,
   unlinkSync,
   existsSync,
+  renameSync,
+  statSync,
+  createReadStream,
 } from 'fs';
 import path from 'path';
 import url from 'url';
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 
 function isDockerDesktop(): boolean {
   const inDocker = existsSync('/.dockerenv');
@@ -30,7 +33,6 @@ import {
   stop as throttleStop,
 } from '@sitespeed.io/throttle';
 import { networkTypes } from './connectivity.js';
-import ffmpeg from 'ffmpeg';
 import ejs from 'ejs';
 import { log, logTimer, generateTestID } from './helpers.js';
 import AdmZip from 'adm-zip';
@@ -54,10 +56,16 @@ import type {
   FilmstripFrame,
   ConnectionType,
   SavedConfig,
+  RunPhase,
+  RunStatus,
+  ResultManifest,
 } from './types.js';
 import type { BrowserContext, Page, Route, Request } from 'playwright';
 import { delayUsingFulfill, delayUsingContinue } from './delay.js';
 import { runBaselinePipeline } from './baseline.js';
+import { BrowserConfig } from './browsers.js';
+import { acquireExecutionLease } from './executionLease.js';
+import { DEFAULT_OPTIONS } from './defaultOptions.js';
 
 const TELESCOPE_ID_HEADER = 'x-telescope-id';
 
@@ -83,25 +91,85 @@ class TestRunner {
   videoRecordingFile: string = '';
   browserInstance: BrowserContext | null = null;
   page: Page | null = null;
+  readonly resultsRoot: string;
+  private readonly startedAt = new Date().toISOString();
+  private closeContextPromise?: Promise<void>;
+  private throttlingStarted = false;
+  private releaseExecutionLease?: () => Promise<void>;
 
   constructor(options: LaunchOptions, browserConfig: BrowserConfigOptions) {
     this.options = options;
     this.testURL = options.url;
     this.selectedBrowser = browserConfig;
     this.browserConfig = browserConfig;
+    this.resultsRoot = path.resolve(
+      options.resultsDir ?? DEFAULT_OPTIONS.resultsDir,
+    );
     this.TESTID = generateTestID();
     this.setupPaths(this.TESTID);
   }
 
+  /** Creates absolute output paths and an isolated browser profile for this run. */
   setupPaths(testID: string): void {
-    this.paths['temporaryContext'] = './tmp/' + testID;
-    this.paths['results'] = './results/' + testID;
-    this.paths['filmstrip'] = this.paths.results + '/filmstrip';
-    mkdirSync(this.paths['results'], { recursive: true });
+    this.paths.temporaryContext = path.join(
+      this.resultsRoot,
+      '.telescope',
+      'tmp',
+      testID,
+    );
+    this.paths.results = path.join(this.resultsRoot, testID);
+    this.paths.filmstrip = path.join(this.paths.results, 'filmstrip');
+    mkdirSync(this.resultsRoot, { recursive: true });
+    mkdirSync(this.paths.results, { recursive: false });
 
     this.selectedBrowser.recordHar.path =
       this.paths['results'] + '/pageload.har';
     this.selectedBrowser.recordVideo.dir = this.paths['results'];
+  }
+
+  /** Reports a lifecycle transition without allowing observers to fail capture. */
+  reportProgress(phase: RunPhase): void {
+    try {
+      this.options.onProgress?.({
+        testId: this.TESTID,
+        resultsPath: this.paths.results,
+        phase,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      log('Progress observer error: ' + (error as Error).message);
+    }
+  }
+
+  /** Throws a consistent cancellation error when an execution was aborted. */
+  throwIfAborted(): void {
+    if (this.options.signal?.aborted) {
+      const error = new Error('Test cancelled');
+      error.name = 'AbortError';
+      throw error;
+    }
+  }
+
+  /** Applies an agent operator's hostname policy to every browser destination. */
+  isAllowedURL(value: string): boolean {
+    if (!this.options.allowedHosts) return true;
+    let target: URL;
+    try {
+      target = new URL(value);
+    } catch {
+      return false;
+    }
+    if (!['http:', 'https:', 'ws:', 'wss:'].includes(target.protocol))
+      return false;
+    const hostname = target.hostname.toLowerCase().replace(/\.$/, '');
+    return this.options.allowedHosts.some(entry => {
+      const allowed = entry.toLowerCase().replace(/\.$/, '');
+      if (allowed.startsWith('*.')) {
+        const suffix = allowed.slice(1);
+        return hostname.endsWith(suffix) && hostname.length > suffix.length;
+      }
+      return hostname === allowed;
+    });
   }
 
   /**
@@ -166,6 +234,10 @@ class TestRunner {
 
       const new_url = new URL(original_url.toString());
       new_url.host = override;
+      if (!this.isAllowedURL(new_url.toString())) {
+        await route.abort('blockedbyclient');
+        return;
+      }
 
       const all_headers = await request.allHeaders();
       const headers = {
@@ -221,6 +293,21 @@ class TestRunner {
    * Also merges in any browser-specific settings
    */
   async createBrowser(): Promise<BrowserContext> {
+    this.throwIfAborted();
+    const profile = new BrowserConfig();
+    profile.createUserDataDir(
+      this.selectedBrowser,
+      this.paths.temporaryContext,
+    );
+    if (
+      this.selectedBrowser.engine === 'firefox' &&
+      this.options.firefoxPrefs
+    ) {
+      profile.addFirefoxPrefs(
+        this.options.firefoxPrefs,
+        this.paths.temporaryContext,
+      );
+    }
     //turn on logging
     this.selectedBrowser.logger = {
       isEnabled: (_name: string, _severity: string) => true,
@@ -240,7 +327,9 @@ class TestRunner {
 
     if (this.options.agentExtra) {
       const simpleOptions: SimplifiedBrowserConfigOptions = {
-        args: this.selectedBrowser.args,
+        args: this.selectedBrowser.args
+          ? [...this.selectedBrowser.args]
+          : undefined,
         channel: this.selectedBrowser.channel,
         engine: this.selectedBrowser.engine,
         firefoxUserPrefs: this.selectedBrowser.firefoxUserPrefs,
@@ -261,29 +350,41 @@ class TestRunner {
           typeof browserType.launchPersistentContext
         >[1],
       );
-      const tmpcontext = await tmpbrowser.newContext();
-      const tmppage = await tmpcontext.newPage();
-
-      // Get the User-Agent string from the blank page in the browser
-      const originalUserAgent = await tmppage.evaluate(
-        () => navigator.userAgent,
-      );
-      await tmpbrowser.close();
-
-      this.selectedBrowser.userAgent = originalUserAgent.concat(
-        ' ',
-        this.options.agentExtra.trim(),
-      );
+      try {
+        const tmpcontext = await tmpbrowser.newContext();
+        const tmppage = await tmpcontext.newPage();
+        const originalUserAgent = await tmppage.evaluate(
+          () => navigator.userAgent,
+        );
+        this.selectedBrowser.userAgent = originalUserAgent.concat(
+          ' ',
+          this.options.agentExtra.trim(),
+        );
+      } finally {
+        await tmpbrowser.close();
+      }
     }
 
+    this.throwIfAborted();
     const browser = await browserType.launchPersistentContext(
       this.paths['temporaryContext'],
-      this.selectedBrowser as Parameters<
-        typeof browserType.launchPersistentContext
-      >[1],
+      {
+        ...this.selectedBrowser,
+        ...(this.options.allowedHosts
+          ? { serviceWorkers: 'block' as const }
+          : {}),
+      } as Parameters<typeof browserType.launchPersistentContext>[1],
     );
-    await this.prepareContext(browser);
-    return browser;
+    this.browserInstance = browser;
+    try {
+      this.throwIfAborted();
+      await this.prepareContext(browser);
+      this.throwIfAborted();
+      return browser;
+    } catch (error) {
+      await this.closeContext();
+      throw error;
+    }
   }
 
   /**
@@ -327,6 +428,10 @@ class TestRunner {
     // Registered last so it runs first — injects a unique ID header into every
     // request, which Playwright records in the HAR.
     await page.route('**/*', async (route: Route, request: Request) => {
+      if (!this.isAllowedURL(request.url())) {
+        await route.abort('blockedbyclient');
+        return;
+      }
       const id = crypto.randomUUID();
       const original = await request.headersArray();
       const headers: Record<string, string> = {};
@@ -365,6 +470,27 @@ class TestRunner {
    * Prepares the context by kicking off anything that needs to be attached at the context level
    */
   async prepareContext(context: BrowserContext): Promise<void> {
+    if (this.options.allowedHosts) {
+      if (!this.isAllowedURL(this.testURL)) {
+        throw new Error('Target hostname is not permitted by this agent');
+      }
+      await context.route('**/*', async route => {
+        if (!this.isAllowedURL(route.request().url())) {
+          await route.abort('blockedbyclient');
+        } else {
+          await route.fallback();
+        }
+      });
+      await context.routeWebSocket('**/*', route => {
+        if (this.isAllowedURL(route.url())) {
+          route.connectToServer();
+        } else {
+          void route
+            .close({ code: 1008, reason: 'Destination is not permitted' })
+            .catch(() => undefined);
+        }
+      });
+    }
     // add any custom headers
     if (this.options.headers) {
       await context.setExtraHTTPHeaders(this.options.headers);
@@ -372,11 +498,11 @@ class TestRunner {
 
     //add any custom cookies
     if (this.options.cookies) {
-      let cookies = this.options.cookies;
-      if (!Array.isArray(cookies)) {
-        //allow for passing a single cookie
-        cookies = [cookies];
-      }
+      const cookies = (
+        Array.isArray(this.options.cookies)
+          ? this.options.cookies
+          : [this.options.cookies]
+      ).map(cookie => ({ ...cookie }));
       for (const cookie of cookies) {
         if (!cookie.url && (!cookie.domain || !cookie.path)) {
           //set the url to our test url
@@ -389,16 +515,19 @@ class TestRunner {
   }
 
   /**
-   * Triggers the navigation based on the passed in url, grabs a screenshot, and closes the context and browser
+   * Navigates and captures one page without finalizing its browser session.
    */
   async doNavigation(): Promise<void> {
     if (!this.page) {
       throw new Error('Page not initialized');
     }
+    this.throwIfAborted();
+    this.reportProgress('running');
 
     try {
       await this.page.goto(this.testURL, { waitUntil: 'networkidle' });
     } catch (err) {
+      this.throwIfAborted();
       // If navigation timed out, set the context offline and continue.
       if (
         err &&
@@ -410,9 +539,19 @@ class TestRunner {
         throw err;
       }
     }
-    // grab our screenshot
+    this.throwIfAborted();
+    await this.capturePage();
+  }
+
+  /** Captures the current document before its context is closed or navigated. */
+  async capturePage(): Promise<void> {
+    if (!this.page || this.page.isClosed()) {
+      throw new Error('Page not available for capture');
+    }
+    this.reportProgress('capturing');
     await this.page.screenshot({
       path: this.paths['results'] + '/screenshot.png',
+      timeout: Math.min(this.options.timeout || DEFAULT_OPTIONS.timeout, 10000),
     });
 
     //grab the videoname
@@ -426,9 +565,20 @@ class TestRunner {
     }
     //collect metrics
     await this.collectMetrics();
-    //close our browser instance
-    if (this.browserInstance) {
-      await this.browserInstance.close();
+  }
+
+  /** Flushes HAR/video once; callers may safely await this more than once. */
+  async closeContext(): Promise<void> {
+    if (this.closeContextPromise) return this.closeContextPromise;
+    const context = this.browserInstance;
+    if (!context) return;
+    this.closeContextPromise = context.close();
+    try {
+      await this.closeContextPromise;
+      if (this.browserInstance === context) this.browserInstance = null;
+    } catch (error) {
+      this.closeContextPromise = undefined;
+      throw error;
     }
   }
 
@@ -590,12 +740,11 @@ class TestRunner {
 
     // Check for Docker Desktop environment before attempting throttling
     if (isDockerDesktop()) {
-      console.error(
+      throw new Error(
         'Network throttling is not supported in Docker Desktop (Mac or Windows). ' +
           'The Docker Desktop Linux VM does not include the ifb kernel module required for traffic shaping. ' +
           'Run on a native Linux host, or run without --connectionType.',
       );
-      process.exit(1);
     }
 
     const start = performance.now();
@@ -605,6 +754,8 @@ class TestRunner {
     >;
 
     try {
+      // Startup can partially change interfaces before rejecting; cleanup owns it.
+      this.throttlingStarted = true;
       await throttleStart({
         up: networkTypes[networkType].up,
         down: networkTypes[networkType].down,
@@ -612,8 +763,12 @@ class TestRunner {
       });
       log('Throttling successfully started');
     } catch (error) {
-      console.error('throttling error: ' + error);
-      process.exit(1);
+      throw new Error(
+        'Network throttling failed: ' + (error as Error).message,
+        {
+          cause: error,
+        },
+      );
     }
     const end = performance.now();
     logTimer('Network Throttle', end, start);
@@ -624,52 +779,66 @@ class TestRunner {
    * Setup our test: create the browser, context and page
    */
   async setupTest(): Promise<void> {
-    this.browserInstance = await this.createBrowser();
-    this.page = await this.createPage(this.browserInstance);
+    this.throwIfAborted();
+    this.reportProgress('launching');
+    this.releaseExecutionLease = await acquireExecutionLease(
+      !!this.options.connectionType,
+    );
+    this.throwIfAborted();
+    const browser = await this.createBrowser();
+    this.throwIfAborted();
+    this.page = await this.createPage(browser);
     if (this.options.timeout && this.options.timeout > 0) {
       await this.page.setDefaultNavigationTimeout(this.options.timeout);
     }
     await this.throttleNetwork();
+    this.throwIfAborted();
   }
 
+  /** Restores traffic shaping only when this runner attempted to apply it. */
+  private async stopThrottling(): Promise<void> {
+    if (!this.throttlingStarted) return;
+    await throttleStop();
+    this.throttlingStarted = false;
+    log('Throttling successfully stopped');
+  }
+
+  /** Extracts optional movie frames with a bounded, shell-free FFmpeg process. */
   async createFilmStrip(): Promise<void> {
+    if (!this.videoRecordingFile || !existsSync(this.videoRecordingFile))
+      return;
     const start = performance.now();
-    const paths = this.paths;
     let filmstripFiles: string[] = [];
-    const frameRate = this.options.frameRate || 1;
+    const frameRate = this.options.frameRate || DEFAULT_OPTIONS.frameRate;
+    mkdirSync(this.paths.filmstrip, { recursive: true });
 
     try {
-      const process = new ffmpeg(this.videoRecordingFile);
-      filmstripFiles = await process.then(
-        function (video) {
-          return new Promise<string[]>((resolve, reject) => {
-            // Callback mode
-            video.fnExtractFrameToJPG(
-              paths['filmstrip'],
-              {
-                frame_rate: frameRate,
-                file_name: 'frame_%s',
-              },
-              function (err: Error | null, files: string[]) {
-                if (err) {
-                  console.error('Error generating filmstrip frames:', err);
-                  reject(err);
-                } else {
-                  resolve(files);
-                }
-              },
-            );
-          });
-        },
-        function (err) {
-          console.error('Error generating filmstrip frames:', err);
-          return [];
-        },
-      );
-    } catch (e) {
-      const error = e as { code?: string; msg?: string };
-      console.error(error.code);
-      console.error(error.msg);
+      await new Promise<void>((resolve, reject) => {
+        execFile(
+          'ffmpeg',
+          [
+            '-hide_banner',
+            '-loglevel',
+            'error',
+            '-y',
+            '-i',
+            this.videoRecordingFile,
+            '-vf',
+            `fps=${frameRate}`,
+            path.join(this.paths.filmstrip, 'frame_%08d.jpg'),
+          ],
+          { timeout: 30000, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024 },
+          error => {
+            if (error) reject(error);
+            else resolve();
+          },
+        );
+      });
+      filmstripFiles = readdirSync(this.paths.filmstrip)
+        .filter(filename => /^frame_\d+\.jpg$/.test(filename))
+        .map(filename => path.join(this.paths.filmstrip, filename));
+    } catch (error) {
+      console.warn('Filmstrip unavailable: ' + (error as Error).message);
     }
 
     this.resultAssets.filmstrip = filmstripFiles
@@ -679,13 +848,15 @@ class TestRunner {
         const match = filename.match(/(?<num>\d+).jpg$/);
         const num = Number.parseInt(match?.groups?.num || '0');
 
-        const ms = Math.floor((num * 1000) / frameRate);
+        const ms = Math.floor((Math.max(0, num - 1) * 1000) / frameRate);
 
         return { num, filename, ms };
       })
       .sort((a, b) => {
         return a.num - b.num;
       });
+
+    this.resultAssets.filmstripFiles = filmstripFiles;
 
     logTimer('Filmstrip', performance.now(), start);
   }
@@ -694,38 +865,130 @@ class TestRunner {
    * Save configuration file used to run the test
    */
   async saveConfig(): Promise<void> {
-    // write config.json
+    const options = { ...this.options };
+    delete options.signal;
+    delete options.onProgress;
+    const config: SavedConfig = {
+      schemaVersion: 1,
+      testId: this.TESTID,
+      url: this.testURL,
+      date: new Date().toUTCString(),
+      options,
+      browserConfig: this.selectedBrowser,
+    };
+    this.writeJSON('config.json', config);
+  }
+
+  /** Atomically writes one required JSON artifact or propagates the I/O error. */
+  private writeJSON(filename: string, value: unknown): void {
+    const destination = path.join(this.paths.results, filename);
+    const temporary = destination + '.' + crypto.randomUUID() + '.tmp';
     try {
-      const config: SavedConfig = {
-        url: this.testURL,
-        date: new Date().toUTCString(),
-        options: this.options,
-        browserConfig: this.selectedBrowser,
-      };
-      writeFileSync(
-        this.paths['results'] + '/config.json',
-        JSON.stringify(config),
-        'utf8',
+      writeFileSync(temporary, JSON.stringify(value), {
+        flag: 'wx',
+        mode: 0o600,
+      });
+      renameSync(temporary, destination);
+    } finally {
+      rmSync(temporary, { force: true });
+    }
+  }
+
+  /** Persists the available diagnostic snapshots, including partial captures. */
+  async writeArtifacts(): Promise<void> {
+    this.writeJSON('console.json', this.consoleMessages);
+    this.writeJSON('resources.json', this.resourceTimings);
+    if (this.metrics && !this.options.script)
+      this.writeJSON('metrics.json', this.metrics);
+  }
+
+  /** Writes portable capture identity, status, and integrity metadata atomically. */
+  async writeResultManifest(status: RunStatus, error?: string): Promise<void> {
+    const manifest: ResultManifest = {
+      schemaVersion: 1,
+      testId: this.TESTID,
+      status,
+      startedAt: this.startedAt,
+      ...(status !== 'running' ? { finishedAt: new Date().toISOString() } : {}),
+      ...(error ? { error } : {}),
+      artifacts: {},
+    };
+    const collect = async (directory: string): Promise<void> => {
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        if (entry.name === 'result.json' || entry.name.endsWith('.tmp'))
+          continue;
+        const absolute = path.join(directory, entry.name);
+        if (entry.isDirectory()) {
+          await collect(absolute);
+        } else if (entry.isFile()) {
+          const digest = crypto.createHash('sha256');
+          for await (const chunk of createReadStream(absolute))
+            digest.update(chunk);
+          const relative = path
+            .relative(this.paths.results, absolute)
+            .split(path.sep)
+            .join('/');
+          manifest.artifacts[relative] = {
+            size: statSync(absolute).size,
+            sha256: digest.digest('hex'),
+          };
+        }
+      }
+    };
+    await collect(this.paths.results);
+    this.writeJSON('result.json', manifest);
+  }
+
+  /** Preserves available failure diagnostics without replacing the original error. */
+  async finalizeFailure(error: unknown): Promise<void> {
+    const message = error instanceof Error ? error.message : String(error);
+    if (this.page && !this.page.isClosed()) {
+      try {
+        await this.capturePage();
+      } catch (captureError) {
+        log('Partial capture error: ' + (captureError as Error).message);
+      }
+    }
+    try {
+      await this.postProcess(
+        this.options.signal?.aborted ? 'cancelled' : 'failed',
+        message,
       );
-    } catch (err) {
-      console.error('Error writing config.json file ' + err);
+    } catch (finalizationError) {
+      log(
+        'Partial result finalization error: ' +
+          (finalizationError as Error).message,
+      );
+      try {
+        await this.writeArtifacts();
+        await this.writeResultManifest(
+          this.options.signal?.aborted ? 'cancelled' : 'failed',
+          message,
+        );
+      } catch (writeError) {
+        log(
+          'Partial result persistence error: ' + (writeError as Error).message,
+        );
+      }
     }
   }
 
   /**
    * Run any post processing on test results
    */
-  async postProcess(): Promise<void> {
-    try {
-      // Only stop throttling if it was actually started
-      if (this.options.connectionType) {
-        await throttleStop();
-        log('Throttling successfully stopped');
-      }
-    } catch (error) {
-      console.error('throttling error: ' + error);
-    }
-    this.fillOutHar();
+  async postProcess(
+    status: RunStatus = 'passed',
+    error?: string,
+  ): Promise<void> {
+    if (status === 'passed') this.throwIfAborted();
+    this.reportProgress('finalizing');
+    await this.closeContext();
+    await this.stopThrottling();
+    if (
+      !this.options.script &&
+      existsSync(path.join(this.paths.results, 'pageload.har'))
+    )
+      this.fillOutHar();
 
     // Get the directory of the current file for resolving relative paths
     // When running from source (Jest/ts-node): lib/testRunner.ts -> lib/ -> project root is ../
@@ -736,37 +999,9 @@ class TestRunner {
       ? path.resolve(currentDir, '../..')
       : path.resolve(currentDir, '..');
 
-    //post process
-    try {
-      writeFileSync(
-        this.paths['results'] + '/console.json',
-        JSON.stringify(this.consoleMessages),
-        'utf8',
-      );
-    } catch (err) {
-      console.error('Error writing console file ' + err);
-    }
+    await this.writeArtifacts();
 
-    try {
-      writeFileSync(
-        this.paths['results'] + '/metrics.json',
-        JSON.stringify(this.metrics),
-        'utf8',
-      );
-    } catch (err) {
-      console.error('Error writing metrics file ' + err);
-    }
-    try {
-      writeFileSync(
-        this.paths['results'] + '/resources.json',
-        JSON.stringify(this.resourceTimings),
-        'utf8',
-      );
-    } catch (err) {
-      console.error('Error writing resources file ' + err);
-    }
-
-    if (this.options.baseline) {
+    if (this.options.baseline && status === 'passed') {
       try {
         await runBaselinePipeline({
           resultsPath: this.paths['results'],
@@ -780,25 +1015,25 @@ class TestRunner {
     //create our filmstrip
     await this.createFilmStrip();
 
-    if (this.options.html) {
-      // Generate HTML report
-      // img/ is at project root
-      copyFileSync(
-        path.resolve(
-          projectRoot,
-          `img/${
-            this.selectedBrowser.channel || this.selectedBrowser.engine
-          }.png`,
-        ),
-        this.paths['results'] + '/engine.png',
-      );
-      const testTemplate = readFileSync(
-        path.resolve(currentDir, './templates/test.ejs'),
-        'utf8',
-      ).toString();
-      const testHTML = ejs.render(testTemplate, this);
-
+    if (this.options.html && this.metrics && !this.options.script) {
       try {
+        copyFileSync(
+          path.resolve(
+            projectRoot,
+            `img/${
+              this.selectedBrowser.channel === 'chromium'
+                ? 'chrome'
+                : this.selectedBrowser.channel || this.selectedBrowser.engine
+            }.png`,
+          ),
+          this.paths['results'] + '/engine.png',
+        );
+        const testTemplate = readFileSync(
+          path.resolve(currentDir, './templates/test.ejs'),
+          'utf8',
+        ).toString();
+        const testHTML = ejs.render(testTemplate, this);
+
         const htmlPath = this.paths['results'] + '/index.html';
         writeFileSync(htmlPath, testHTML, 'utf8');
 
@@ -819,11 +1054,15 @@ class TestRunner {
     }
 
     if (this.options.list) {
-      const files = readdirSync('./results/', { withFileTypes: true });
+      const files = readdirSync(this.resultsRoot, { withFileTypes: true });
       const tests = files
-        .filter(file => file.isDirectory())
+        .filter(file => file.isDirectory() && file.name !== '.telescope')
         .map(folder => {
-          const configFileName = `./results/${folder.name}/config.json`;
+          const configFileName = path.join(
+            this.resultsRoot,
+            folder.name,
+            'config.json',
+          );
           try {
             const config = readFileSync(configFileName, 'utf8').toString();
             return { folder: folder.name, config: JSON.parse(config) };
@@ -845,37 +1084,45 @@ class TestRunner {
       const listHTML = ejs.render(listTemplate, { tests });
 
       try {
-        writeFileSync('./results/index.html', listHTML, 'utf8');
+        writeFileSync(
+          path.join(this.resultsRoot, 'index.html'),
+          listHTML,
+          'utf8',
+        );
       } catch (err) {
         console.error('Error writing html file ' + err);
       }
     }
 
+    if (status === 'passed') this.throwIfAborted();
+    // Include the terminal capture state and every completed artifact in archives.
+    await this.writeResultManifest(status, error);
+
     // handle the zipping
     if (this.options.zip) {
-      try {
-        const outputZip = `./results/${this.TESTID}.zip`;
-        const zip = new AdmZip();
-        zip.addLocalFolder(this.paths['results']);
-        zip.writeZip(outputZip);
-      } catch (err) {
-        console.error('Error creating zip file:', err);
-      }
+      const outputZip = path.join(this.resultsRoot, `${this.TESTID}.zip`);
+      const zip = new AdmZip();
+      zip.addLocalFolder(this.paths['results']);
+      zip.writeZip(outputZip);
     }
 
     // handle uploading
     if (this.options.uploadUrl) {
-      const outputZip = `./results/${this.TESTID}.zip`;
       const tempZip = !this.options.zip;
+      const outputZip = tempZip
+        ? path.join(this.resultsRoot, '.telescope', 'tmp', `${this.TESTID}.zip`)
+        : path.join(this.resultsRoot, `${this.TESTID}.zip`);
 
       try {
         if (tempZip) {
+          mkdirSync(path.dirname(outputZip), { recursive: true });
           const zip = new AdmZip();
           zip.addLocalFolder(this.paths['results']);
           zip.writeZip(outputZip);
         }
 
         const form = new FormData();
+        form.append('source', 'cli');
         form.append(
           'file',
           new Blob([readFileSync(outputZip)], { type: 'application/zip' }),
@@ -885,10 +1132,13 @@ class TestRunner {
         const response = await fetch(this.options.uploadUrl, {
           method: 'POST',
           body: form,
+          signal: AbortSignal.timeout(
+            Math.min(this.options.timeout || DEFAULT_OPTIONS.timeout, 30000),
+          ),
         });
 
         if (!response.ok) {
-          console.error(
+          throw new Error(
             `Error uploading zip file: ${response.status} ${response.statusText}`,
           );
         }
@@ -906,6 +1156,7 @@ class TestRunner {
 
     //run cleanup
     await this.cleanup();
+    this.reportProgress('complete');
   }
 
   mergeEntries(harEntries: HarEntry[], lcpURL: string | null): HarEntry[] {
@@ -988,9 +1239,10 @@ class TestRunner {
 
     //first, TTFB
     const navTiming = this.metrics?.navigationTiming;
-    if (navTiming) {
-      const TTFB = navTiming.responseStart - navTiming.navigationStart;
-      harData.log.pages[0].pageTimings._TTFB = TTFB;
+    const firstPage = harData.log.pages?.[0];
+    if (navTiming && firstPage && Number.isFinite(navTiming.responseStart)) {
+      const TTFB = navTiming.responseStart - (navTiming.navigationStart ?? 0);
+      firstPage.pageTimings._TTFB = TTFB;
     }
 
     // now our LCP
@@ -998,8 +1250,8 @@ class TestRunner {
     let lcpURL: string | null = null;
     if (lcpEvents && lcpEvents.length > 0) {
       const lcp = lcpEvents[lcpEvents.length - 1];
-      if (lcp) {
-        harData.log.pages[0].pageTimings._LCP = lcp.startTime;
+      if (lcp && firstPage) {
+        firstPage.pageTimings._LCP = lcp.startTime;
         if (lcp.url) {
           //let's see if we can find it in our resources
           lcpURL = lcp.url;
@@ -1010,15 +1262,7 @@ class TestRunner {
     //now lets add the raw timings we collected
     const mergedEntries = this.mergeEntries(harData.log.entries, lcpURL);
     harData.log.entries = mergedEntries;
-    try {
-      writeFileSync(
-        this.paths['results'] + '/pageload.har',
-        JSON.stringify(harData),
-        'utf8',
-      );
-    } catch (err) {
-      console.error('Error writing har file ' + err);
-    }
+    this.writeJSON('pageload.har', harData);
     logTimer('Har Edit', performance.now(), start);
   }
 
@@ -1026,16 +1270,13 @@ class TestRunner {
    * Opens a file in the default browser
    */
   openInBrowser(filePath: string): void {
-    let command: string;
-    if (process.platform === 'darwin') {
-      command = `open "${filePath}"`;
-    } else if (process.platform === 'win32') {
-      command = `start "" "${filePath}"`;
-    } else {
-      command = `xdg-open "${filePath}"`;
-    }
-
-    exec(command, err => {
+    const command =
+      process.platform === 'darwin'
+        ? 'open'
+        : process.platform === 'win32'
+          ? 'explorer.exe'
+          : 'xdg-open';
+    execFile(command, [filePath], err => {
       if (err) {
         console.error('Error opening HTML report:', err);
       }
@@ -1047,19 +1288,30 @@ class TestRunner {
    */
   async cleanup(): Promise<void> {
     log('Cleanup started');
-    // Close browser instance if it exists (prevents Jest open handles)
-    if (this.browserInstance) {
+    let cleanupError: unknown;
+    try {
+      await this.closeContext();
+    } catch (error) {
+      cleanupError = error;
+    }
+    try {
+      await this.stopThrottling();
+    } catch (error) {
+      cleanupError ??= error;
+    }
+    // Retain the lease if traffic shaping could not be restored; fail closed.
+    if (!this.throttlingStarted && this.releaseExecutionLease) {
       try {
-        await this.browserInstance.close();
-        log('Browser instance closed');
-      } catch (err) {
-        log('Error closing browser instance: ' + (err as Error).message);
+        await this.releaseExecutionLease();
+        this.releaseExecutionLease = undefined;
+      } catch (error) {
+        cleanupError ??= error;
       }
-      this.browserInstance = null as unknown as BrowserContext;
     }
     rmSync(this.paths['temporaryContext'], { recursive: true, force: true });
     log('Cleanup ended');
     console.log('Test ID:' + this.TESTID);
+    if (cleanupError) throw cleanupError;
   }
 }
 

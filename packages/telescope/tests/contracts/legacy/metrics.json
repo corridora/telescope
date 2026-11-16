@@ -1,0 +1,33 @@
+{
+  "navigationTiming": {
+    "navigationStart": 0,
+    "unloadEventStart": 0,
+    "unloadEventEnd": 0,
+    "redirectStart": 0,
+    "redirectEnd": 0,
+    "fetchStart": 0,
+    "domainLookupStart": 0,
+    "domainLookupEnd": 0,
+    "connectStart": 0,
+    "connectEnd": 0,
+    "secureConnectionStart": 0,
+    "requestStart": 0,
+    "responseStart": 20,
+    "responseEnd": 40,
+    "domLoading": 0,
+    "domInteractive": 0,
+    "domContentLoadedEventStart": 80,
+    "domContentLoadedEventEnd": 80,
+    "domComplete": 0,
+    "loadEventStart": 100,
+    "loadEventEnd": 100,
+    "name": "http://fixture.invalid/",
+    "entryType": "navigation",
+    "startTime": 0,
+    "duration": 100
+  },
+  "paintTiming": [],
+  "userTiming": [],
+  "largestContentfulPaint": [],
+  "layoutShifts": []
+}

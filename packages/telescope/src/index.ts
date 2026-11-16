@@ -55,6 +55,33 @@ export type {
   Cookie,
 };
 
+export type {
+  AgentOptions,
+  ArtifactDescriptor,
+  ForwardMetadata,
+  ForwardingDelivery,
+  ForwardingReceipt,
+  ForwardingState,
+  IdentityManifest,
+  LocalDefinition,
+  LocalJob,
+  LocalJobStatus,
+  LocalResultSummary,
+  LocalScriptReference,
+  LocalServerOptions,
+  ResultManifest,
+  RunPhase,
+  RunProgress,
+  RunStatus,
+  ScenarioManifest,
+  ScenarioStepResult,
+  ScenarioStepStatus,
+  ScriptContext,
+  ScriptStep,
+  ScriptStepKind,
+  TestScript,
+} from './types.js';
+
 /**
  * Telescope class for programmatic usage.
  * Provides an object-oriented interface to the testing functionality.
@@ -103,9 +130,7 @@ function getRunner(
  * @throws If the test fails
  * @private
  */
-async function executeTest(
-  options: LaunchOptions,
-): Promise<SuccessfulTestResult> {
+async function executeTest(options: LaunchOptions): Promise<TestResult> {
   // Enforce the http(s)-only contract here so it applies to both the CLI
   // and programmatic callers. The CLI normalizes scheme-less inputs to
   // either http:// or https:// (see normalizeUrlScheme; localhost-equivalent
@@ -116,11 +141,32 @@ async function executeTest(
       `Only http:// and https:// URLs are supported (got "${options.url}")`,
     );
   }
+  options.signal?.throwIfAborted();
+  if (
+    options.resultsDir !== undefined &&
+    (typeof options.resultsDir !== 'string' || !options.resultsDir.trim())
+  ) {
+    throw new Error('resultsDir must be a nonempty directory path');
+  }
   const config: LaunchOptions = {
     ...DEFAULT_OPTIONS,
     ...options,
     baseline: options.baseline ?? DEFAULT_OPTIONS.baseline,
   };
+  if (config.script && config.baseline) {
+    throw new Error(
+      'Baseline analysis cannot reproduce a scripted session; run it as a separate single-page test',
+    );
+  }
+  if (
+    config.scriptTimeout !== undefined &&
+    (!Number.isSafeInteger(config.scriptTimeout) || config.scriptTimeout <= 0)
+  ) {
+    throw new Error('scriptTimeout must be a positive integer');
+  }
+  const script = config.script
+    ? await (await import('./scriptRunner.js')).loadTestScript(config.script)
+    : undefined;
   const browserConfig = new BrowserConfig().getBrowserConfig(
     config.browser || 'chrome',
     config,
@@ -133,13 +179,22 @@ async function executeTest(
   log(config);
 
   const Runner = getRunner(config, browserConfig);
+  const abort = (): void => {
+    void Runner.closeContext().catch(() => undefined);
+  };
+  config.signal?.addEventListener('abort', abort, { once: true });
+  let executionFailed = false;
 
   try {
+    Runner.reportProgress('validating');
     await Runner.saveConfig();
+    await Runner.writeResultManifest('running');
 
     // Bail out early if we're just doing a dry run
     if (config.dry) {
+      await Runner.writeResultManifest('dry');
       await Runner.cleanup();
+      Runner.reportProgress('complete');
 
       return {
         success: true,
@@ -149,9 +204,20 @@ async function executeTest(
       };
     }
 
+    config.signal?.throwIfAborted();
+    Runner.reportProgress('launching');
     await Runner.setupTest();
-    await Runner.doNavigation();
+    config.signal?.throwIfAborted();
+    Runner.reportProgress('running');
+    if (script) {
+      await (await import('./scriptRunner.js')).executeScript(Runner, script);
+    } else {
+      await Runner.doNavigation();
+    }
+    config.signal?.throwIfAborted();
+    Runner.reportProgress('finalizing');
     await Runner.postProcess();
+    Runner.reportProgress('complete');
 
     return {
       success: true,
@@ -159,13 +225,39 @@ async function executeTest(
       resultsPath: Runner.paths.results,
     };
   } catch (error) {
-    // Ensure cleanup runs even on error (closes browser + removes temp files)
+    executionFailed = true;
+    try {
+      await Runner.finalizeFailure(error);
+    } catch (_finalizationError) {
+      // Preserve the original execution error and its capture location.
+    }
+    return {
+      success: false,
+      error: config.signal?.aborted
+        ? 'Test cancelled'
+        : (error as Error).message,
+      testId: Runner.TESTID,
+      resultsPath: Runner.paths.results,
+    };
+  } finally {
+    config.signal?.removeEventListener('abort', abort);
     try {
       await Runner.cleanup();
-    } catch (_cleanupError) {
-      // Ignore cleanup errors
+    } catch (error) {
+      if (!executionFailed) {
+        const message = `Capture cleanup failed: ${(error as Error).message}`;
+        await Runner.writeResultManifest('failed', message).catch(
+          () => undefined,
+        );
+        return {
+          success: false,
+          error: message,
+          testId: Runner.TESTID,
+          resultsPath: Runner.paths.results,
+        };
+      }
+      log('Cleanup failed after execution error: ' + (error as Error).message);
     }
-    throw error;
   }
 }
 
@@ -198,16 +290,44 @@ export async function launchTest(options: LaunchOptions): Promise<TestResult> {
 }
 
 export default function browserAgent(): void {
+  if (process.argv[2] === 'local' || process.argv[2] === 'agent') {
+    void serviceCommand(process.argv[2]).catch(error => {
+      console.error((error as Error).message);
+      process.exitCode = 1;
+    });
+    return;
+  }
   const pkgVersion = getPackageVersion();
 
   program
     .name('telescope')
     .description('Cross-browser synthetic testing agent')
+    .addHelpText(
+      'after',
+      '\nServices:\n  telescope local [options]  Run and save tests through a local web UI\n  telescope agent [options]  Connect an outbound execution agent\n\nUse telescope local --help or telescope agent --help for service options.',
+    )
     .argument(
       '[url]',
       'URL to run tests against. Can also be provided via -u/--url.',
     )
     .addOption(new Option('-u, --url <url>', 'URL to run tests against'))
+    .addOption(
+      new Option(
+        '--resultsDir <directory>',
+        'Persistent results directory',
+      ).default(DEFAULT_OPTIONS.resultsDir),
+    )
+    .addOption(
+      new Option('--script <path>', 'Trusted local ESM multi-step script'),
+    )
+    .addOption(
+      new Option(
+        '--scriptTimeout <int>',
+        'Maximum script execution time in milliseconds',
+      ).argParser(value =>
+        parseNumeric(PositiveIntSchema, value, '--scriptTimeout'),
+      ),
+    )
     .version(pkgVersion, '-v, --version', 'Output the package version number')
     .addOption(
       new Option(
@@ -466,7 +586,85 @@ export default function browserAgent(): void {
     const result = await launchTest(options);
     if (!result.success) {
       console.error('Test failed:', result.error);
+      if (result.resultsPath)
+        console.error('Partial results:', result.resultsPath);
       process.exit(1);
     }
   })();
+}
+
+/** Starts an installed local workspace or outbound agent without a target URL. */
+async function serviceCommand(mode: 'local' | 'agent'): Promise<void> {
+  const command = new Command(`telescope ${mode}`);
+  if (mode === 'local') {
+    command
+      .description('Run and save Telescope tests through a local web workspace')
+      .option(
+        '--host <host>',
+        'Listen address (non-loopback requires explicit opt-in)',
+        '127.0.0.1',
+      )
+      .option(
+        '--port <number>',
+        'Web UI port',
+        value => parseNumeric(PositiveIntSchema, value, '--port'),
+        4321,
+      )
+      .option(
+        '--resultsDir <directory>',
+        'Persistent result library',
+        DEFAULT_OPTIONS.resultsDir,
+      )
+      .option('--no-open', 'Print the UI address without opening a browser');
+    command.parse(process.argv.slice(3), { from: 'user' });
+    const { startLocalServer } = await import('./localServer.js');
+    await startLocalServer(command.opts());
+    return;
+  }
+  command
+    .description(
+      'Connect an outbound Telescope execution agent to a web instance',
+    )
+    .requiredOption('--controller <url>', 'Controller URL')
+    .requiredOption(
+      '--tokenFile <path>',
+      'File containing the scoped agent credential',
+    )
+    .requiredOption(
+      '--allowHosts <hosts>',
+      'Comma-separated allowed target hostnames',
+      value =>
+        value
+          .split(',')
+          .map((host: string) => host.trim())
+          .filter(Boolean),
+    )
+    .option(
+      '--spoolDir <directory>',
+      'Private pending-delivery storage directory',
+    )
+    .option('--name <name>', 'Agent display name')
+    .option(
+      '--allowInsecureHttp',
+      'Explicitly allow a private development controller over HTTP',
+    )
+    .option(
+      '--pollInterval <milliseconds>',
+      'Polling interval',
+      value => parseNumeric(PositiveIntSchema, value, '--pollInterval'),
+      3000,
+    );
+  command.parse(process.argv.slice(3), { from: 'user' });
+  const controller = new AbortController();
+  const stop = (): void => controller.abort();
+  process.once('SIGTERM', stop);
+  process.once('SIGINT', stop);
+  try {
+    const { startAgent } = await import('./agent.js');
+    const opts = command.opts<import('./types.js').AgentOptions>();
+    await startAgent({ ...opts, signal: controller.signal });
+  } finally {
+    process.removeListener('SIGTERM', stop);
+    process.removeListener('SIGINT', stop);
+  }
 }

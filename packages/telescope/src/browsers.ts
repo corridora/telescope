@@ -1,11 +1,16 @@
 import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import type {
   BrowserName,
   BrowserConfigOptions,
   BrowserConfigEntry,
   LaunchOptions,
 } from './types.js';
-import { DEFAULT_BROWSER_HEIGHT, DEFAULT_BROWSER_WIDTH } from './defaultOptions.js';
+import {
+  DEFAULT_BROWSER_HEIGHT,
+  DEFAULT_BROWSER_WIDTH,
+} from './defaultOptions.js';
 
 const TRUTHY_VALUES = new Set(['true', '1', 'yes', 'on']);
 const FALSY_VALUES = new Set(['false', '0', 'no', 'off']);
@@ -101,7 +106,8 @@ class BrowserConfig {
       flags: true,
       args: [],
     },
-    chromium: { // AKA Google Chrome for Testing from Playwright CI image
+    chromium: {
+      // AKA Google Chrome for Testing from Playwright CI image
       engine: 'chromium',
       channel: 'chromium',
       headless,
@@ -191,35 +197,39 @@ class BrowserConfig {
     return configuredBrowsers;
   }
 
-  addFirefoxPrefs(prefs: Record<string, string | number | boolean>): void {
-    const userPrefLines: string[] = [];
-    for (const [key, value] of Object.entries(prefs)) {
-      let prefline: string;
-      if (typeof value == 'boolean') {
-        prefline = `user_pref("${key}", ${value});\n`;
-      } else {
-        prefline = `user_pref("${key}", "${value}");\n`;
-      }
-      userPrefLines.push(prefline);
+  /** Writes validated Firefox preferences into this run's isolated profile. */
+  addFirefoxPrefs(
+    prefs: Record<string, string | number | boolean>,
+    userDataDir: string,
+  ): void {
+    const lines = Object.entries(prefs).map(
+      ([key, value]) =>
+        `user_pref(${JSON.stringify(key)}, ${JSON.stringify(value)});`,
+    );
+    if (lines.length > 0) {
+      fs.appendFileSync(
+        path.join(userDataDir, 'user.js'),
+        lines.join('\n') + '\n',
+      );
     }
-    userPrefLines.forEach(s => fs.appendFileSync('./tmp/user.js', s));
   }
 
-  createUserDataDir(browserConfig: BrowserConfigEntry): void {
-    //let's make sure there's a user directory
-    const userDataDir = './tmp';
-    if (!fs.existsSync(userDataDir)) {
-      fs.mkdirSync(userDataDir);
-    }
-    if (browserConfig.engine == 'firefox') {
-      //let's copy over our starter user.js
-      // eventually, it'd be nice to avoid this but playwright doesn't
-      // let you set firefox user pref on an persisted context
-      fs.copyFile('./support/firefox/user.js', './tmp/user.js', err => {
-        if (err) {
-          console.error('Error Creating User Data Directory:', err);
-        }
-      });
+  /** Prepares shipped support files before a persistent browser is launched. */
+  createUserDataDir(
+    browserConfig: Pick<BrowserConfigEntry, 'engine'>,
+    userDataDir: string,
+  ): void {
+    fs.mkdirSync(userDataDir, { recursive: true });
+    if (browserConfig.engine === 'firefox') {
+      const currentDir = path.dirname(fileURLToPath(import.meta.url));
+      const isCompiledDist = currentDir.includes('/dist/');
+      const packageRoot = isCompiledDist
+        ? path.resolve(currentDir, '../..')
+        : path.resolve(currentDir, '..');
+      fs.copyFileSync(
+        path.join(packageRoot, 'support/firefox/user.js'),
+        path.join(userDataDir, 'user.js'),
+      );
     }
   }
 
@@ -241,6 +251,13 @@ class BrowserConfig {
     const browserConfig: BrowserConfigOptions = {
       ...baseConfig,
       ...this.defaultBrowserOptions,
+      headless: options.headless ?? this.defaultBrowserOptions.headless,
+      viewport: { ...this.defaultBrowserOptions.viewport },
+      recordHar: { ...this.defaultBrowserOptions.recordHar },
+      recordVideo: {
+        ...this.defaultBrowserOptions.recordVideo,
+        size: { ...this.defaultBrowserOptions.recordVideo.size },
+      },
     };
 
     // Handle Chromium-specific args
@@ -258,9 +275,7 @@ class BrowserConfig {
       baseConfig.firefoxUserPrefs &&
       options.firefoxPrefs
     ) {
-      this.createUserDataDir(baseConfig);
-      this.addFirefoxPrefs(options.firefoxPrefs);
-      browserConfig.firefoxUserPrefs = options.firefoxPrefs || {};
+      browserConfig.firefoxUserPrefs = { ...options.firefoxPrefs };
     }
 
     // Handle Firefox mozLog
@@ -275,9 +290,7 @@ class BrowserConfig {
 
     // resolve viewport dimensions: explicit user value > device value > fallback default
     const resolvedWidth =
-      options.width ??
-      options.device?.viewport.width
-      ?? DEFAULT_BROWSER_WIDTH;
+      options.width ?? options.device?.viewport.width ?? DEFAULT_BROWSER_WIDTH;
     const resolvedHeight =
       options.height ??
       options.device?.viewport.height ??

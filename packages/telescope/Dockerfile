@@ -41,8 +41,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && npm run build --workspace packages/telescope \
     && npm prune --omit=dev --ignore-scripts --workspace packages/telescope --include-workspace-root \
-    && mkdir -p /app/results /app/tmp \
-    && chown node:node /app/results /app/tmp \
+    && mkdir -p /app/results /app/tmp /data \
+    && chown node:node /app/results /app/tmp /data \
     && chmod -R a+rX "$PLAYWRIGHT_BROWSERS_PATH"
 
 USER node

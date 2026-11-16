@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "testId": "2026_11_16_00_00_00_00000000-0000-4000-8000-000000000002",
+  "status": "failed",
+  "startedAt": "2026-11-16T00:00:00.000Z",
+  "artifacts": {
+    "config.json": {
+      "size": 298,
+      "sha256": "c6d12510e77e601a123f63516fea96020fa56f37bfdbc5901265216705609fb4"
+    },
+    "console.json": {
+      "size": 185,
+      "sha256": "6efa9797ca84d10730647cc3428d866e4ad2c5217b080ac657716b485d28ae50"
+    }
+  },
+  "finishedAt": "2026-11-16T00:00:01.000Z",
+  "error": "Fixture navigation failed"
+}

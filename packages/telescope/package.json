@@ -6,6 +6,10 @@
   "types": "dist/src/index.d.ts",
   "type": "module",
   "exports": {
+    "./defaults": {
+      "types": "./dist/src/defaultOptions.d.ts",
+      "import": "./dist/src/defaultOptions.js"
+    },
     "./contracts": {
       "types": "./dist/src/contracts.d.ts",
       "import": "./dist/src/contracts.js"
@@ -94,6 +98,7 @@
     "css-tree": "^3.2.1",
     "ejs": "^6.0.1",
     "ffmpeg": "^0.0.4",
+    "fflate": "^0.8.2",
     "playwright": "^1.61.1",
     "playwright-webkit": "^1.61.1",
     "web-features": "^3.34.2",

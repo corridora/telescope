@@ -1,0 +1,11 @@
+[
+  {
+    "type": "error",
+    "text": "Fixture navigation failed",
+    "location": {
+      "url": "http://fixture.invalid/",
+      "lineNumber": 0,
+      "columnNumber": 0
+    }
+  }
+]

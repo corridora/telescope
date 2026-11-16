@@ -23,15 +23,7 @@ export type Cookie = Parameters<BrowserContext['addCookies']>[0][number];
  * Available connection types for network throttling
  */
 export type ConnectionType =
-  | '3g'
-  | '3gfast'
-  | '3gslow'
-  | '2g'
-  | 'cable'
-  | 'dsl'
-  | '4g'
-  | 'fios'
-  | false;
+  '3g' | '3gfast' | '3gslow' | '2g' | 'cable' | 'dsl' | '4g' | 'fios' | false;
 
 /**
  * Network profile configuration for throttling
@@ -75,11 +67,7 @@ export type PlaywrightEngine = 'chromium' | 'webkit' | 'firefox';
  * Browser channel for Chromium-based browsers
  */
 export type BrowserChannel =
-  | 'chrome'
-  | 'chrome-beta'
-  | 'chrome-canary'
-  | 'chromium'
-  | 'msedge';
+  'chrome' | 'chrome-beta' | 'chrome-canary' | 'chromium' | 'msedge';
 
 /**
  * Base browser configuration
@@ -119,9 +107,7 @@ export interface WebKitBrowserConfig extends BaseBrowserConfig {
  * Union of all browser configurations
  */
 export type BrowserConfigEntry =
-  | ChromiumBrowserConfig
-  | FirefoxBrowserConfig
-  | WebKitBrowserConfig;
+  ChromiumBrowserConfig | FirefoxBrowserConfig | WebKitBrowserConfig;
 
 /**
  * Full browser configuration with all runtime options
@@ -175,6 +161,8 @@ export interface LaunchOptions {
   resultsDir?: string;
   /** Override the environment-derived browser display setting. */
   headless?: boolean;
+  /** Service-enforced target/resource host policy; not a public CLI override. */
+  allowedHosts?: string[];
   /** Cancels browser execution while preserving available output. */
   signal?: AbortSignal;
   /** Receives lifecycle updates; never serialized into captured configuration. */
@@ -212,6 +200,8 @@ export interface LaunchOptions {
   delay?: Record<string, number>;
   delayUsing?: DelayMethod;
   device?: CustomDeviceDescriptor;
+  /** Original named descriptor retained for reusable UI definitions. */
+  deviceName?: string;
 }
 
 /**
@@ -286,12 +276,7 @@ export interface RunProgress {
 
 /** Capture outcomes; storage publication and network delivery are separate. */
 export type RunStatus =
-  | 'running'
-  | 'passed'
-  | 'failed'
-  | 'cancelled'
-  | 'interrupted'
-  | 'dry';
+  'running' | 'passed' | 'failed' | 'cancelled' | 'interrupted' | 'dry';
 
 /** Integrity information for an artifact relative to its capture directory. */
 export interface ArtifactDescriptor {
@@ -327,12 +312,62 @@ export interface AgentOptions {
   pollInterval?: number;
   allowHosts?: string[];
   signal?: AbortSignal;
+  /** Explicit development exception for a private HTTP controller endpoint. */
+  allowInsecureHttp?: boolean;
 }
 
 /** Portable identity for legacy archives without a capture manifest. */
 export interface IdentityManifest {
   schemaVersion: 1;
   testId: string;
+}
+
+/** Outgoing forwarding state is independent of a capture's outcome. */
+export type ForwardingState =
+  | 'awaiting_local_commit'
+  | 'waiting_review'
+  | 'pending'
+  | 'sending'
+  | 'retrying'
+  | 'paused'
+  | 'accepted'
+  | 'blocked'
+  | 'expired'
+  | 'failed'
+  | 'cancelled';
+
+export interface ForwardMetadata {
+  source: string;
+  name?: string;
+  description?: string;
+  filename?: string;
+}
+
+/** Remote acknowledgment, without assuming HTTP acceptance proves durable storage. */
+export interface ForwardingReceipt {
+  status: number;
+  accepted: true;
+  durableStorageConfirmed: boolean;
+  remoteTestId?: string;
+  remoteResultUrl?: string;
+}
+
+/** Secret-free forwarding status exposed through an authorized local UI. */
+export interface ForwardingDelivery {
+  deliveryId: string;
+  testId: string;
+  destinationLabel: string;
+  state: ForwardingState;
+  attemptCount: number;
+  createdAt: string;
+  updatedAt: string;
+  nextAttemptAt: string | null;
+  sourceExpiresAt: string;
+  lastStatus: number | null;
+  error: string | null;
+  receipt: ForwardingReceipt | null;
+  retryAvailable: boolean;
+  cancellationRequested: boolean;
 }
 
 /** Values supplied to trusted, local Playwright step callbacks. */
@@ -360,12 +395,7 @@ export interface TestScript {
 }
 
 export type ScenarioStepStatus =
-  | 'pending'
-  | 'running'
-  | 'passed'
-  | 'failed'
-  | 'skipped'
-  | 'cancelled';
+  'pending' | 'running' | 'passed' | 'failed' | 'skipped' | 'cancelled';
 
 /** Serializable outcome for an individual measured interval. */
 export interface ScenarioStepResult {
@@ -411,6 +441,8 @@ export type LocalJobStatus =
 /** Durable local execution state; callbacks and secrets are never presets. */
 export interface LocalJob {
   id: string;
+  name?: string;
+  description?: string;
   createdAt: string;
   updatedAt: string;
   status: LocalJobStatus;
@@ -419,6 +451,13 @@ export interface LocalJob {
   resultsPath?: string;
   error?: string;
   progress?: RunProgress;
+  script?: LocalScriptReference;
+}
+
+/** A pre-provisioned script reference; never executable source or an arbitrary path. */
+export interface LocalScriptReference {
+  id: string;
+  sha256: string;
 }
 
 /** Reusable named configuration, independent from immutable run snapshots. */
@@ -429,6 +468,7 @@ export interface LocalDefinition {
   options: LaunchOptions;
   createdAt: string;
   updatedAt: string;
+  script?: LocalScriptReference;
 }
 
 /** Capture metadata used to browse the local result library. */
@@ -660,7 +700,7 @@ export interface ResourceTiming {
  * Request priority information
  */
 export type PriorityObject = {
-  initialPriority: string,
+  initialPriority: string;
 };
 export interface PriorityInfo {
   [key: string]: PriorityObject;
@@ -766,6 +806,7 @@ export type HARContentEncoding = typeof BASE64 | undefined;
  * HAR entry with extended timing data
  */
 export interface HarEntry {
+  pageref?: string;
   request: {
     url: string;
     method: string;
@@ -812,6 +853,9 @@ export interface HarPageTimings {
  * HAR page
  */
 export interface HarPage {
+  id?: string;
+  startedDateTime?: string;
+  title?: string;
   pageTimings: HarPageTimings;
 }
 
@@ -840,9 +884,7 @@ export interface HarData {
 
 /** A CSS syntax occurrence that can be resolved against Baseline data. */
 export type CSSFeatureDetection =
-  | CSSDescriptorDetection
-  | CSSPropertyDetection
-  | CSSPropertyValueDetection;
+  CSSDescriptorDetection | CSSPropertyDetection | CSSPropertyValueDetection;
 
 /** A descriptor mapped through the at-rule that defines its BCD namespace. */
 export interface CSSDescriptorDetection {
@@ -878,9 +920,7 @@ export interface CSSPropertyValueDetection {
 
 export type JSONPrimitive = boolean | number | string | null;
 export type JSONValue =
-  | JSONPrimitive
-  | JSONValue[]
-  | { [key: string]: JSONValue };
+  JSONPrimitive | JSONValue[] | { [key: string]: JSONValue };
 
 /**
  * Inputs available to the post-performance Baseline pipeline.
@@ -911,11 +951,7 @@ export interface CSSSource {
 
 /** How a JavaScript or Web API is exposed from the browser global object. */
 export type JSAPIKind =
-  | 'constructor'
-  | 'global_function'
-  | 'method'
-  | 'property'
-  | 'static_method';
+  'constructor' | 'global_function' | 'method' | 'property' | 'static_method';
 
 /** A browser-global API that can be correlated with Baseline compatibility. */
 export interface JSAPIRegistryEntry {
@@ -1049,7 +1085,7 @@ export interface CLIOptions {
   block?: string[];
   firefoxPrefs?: Record<string, string | number | boolean>;
   cpuThrottle?: number;
-  connectionType?: string;
+  connectionType?: string | false;
   width?: number;
   height?: number;
   frameRate?: number;
@@ -1129,9 +1165,9 @@ export interface CustomDeviceDescriptor {
 // ============================================================================
 
 export interface testServerConfig {
-  fixturesDirPath: string,
-  delay?: number,
-  compress?: number
+  fixturesDirPath: string;
+  delay?: number;
+  compress?: number;
 }
 
 export const mimeTypes: Record<string, string> = {
@@ -1146,5 +1182,5 @@ export const mimeTypes: Record<string, string> = {
   png: 'image/png',
   svg: 'image/svg_xml',
   webp: 'image/webp',
-  woff2: 'font/woff2'
+  woff2: 'font/woff2',
 };

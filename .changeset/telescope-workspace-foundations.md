@@ -2,4 +2,4 @@
 '@cloudflare/telescope': minor
 ---
 
-Add versioned capture contracts, configurable persistent result paths, and service-ready execution metadata for local workspaces and remote agents.
+Add a persistent local run/results workspace, cancellable execution with partial results, trusted multi-step scripts with scoped diagnostics, and outbound remote execution agents. Introduce portable capture contracts, configurable result paths, and Docker deployment options for these workflows.

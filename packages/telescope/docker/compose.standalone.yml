@@ -1,0 +1,35 @@
+# Local UI, runner, and deterministic target fixture in one container.
+# Run from the repository root; see README.md beside this file.
+services:
+  telescope:
+    build:
+      context: ../../..
+      dockerfile: packages/telescope/Dockerfile
+    platform: linux/amd64
+    init: true
+    shm_size: 1gb
+    security_opt:
+      - seccomp=./seccomp_profile.json
+    entrypoint: [node, /app/packages/telescope/docker/standalone.mjs]
+    ports:
+      - '127.0.0.1:4321:4321'
+    environment:
+      HEADLESS: 'true'
+      RUNNING_IN_DOCKER: 'true'
+      TELESCOPE_LOCAL_TOKEN: ${TELESCOPE_LOCAL_TOKEN:?Set a stable private administrator token of at least 24 characters}
+    volumes:
+      - telescope-data:/data
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:4321/health').then(async r => process.exit(r.ok && (await r.json()).status === 'ready' ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 10s
+      timeout: 3s
+      start_period: 20s
+      retries: 5
+    stop_grace_period: 30s
+
+volumes:
+  telescope-data:
