@@ -10,6 +10,7 @@
     "dev:setup": "./scripts/dev-setup.sh",
     "dev:clean": "rm -rf .wrangler .env dist node_modules",
     "cf-typegen": "wrangler types",
+    "build": "npm run build --workspace @cloudflare/telescope && cross-env CLOUDFLARE_ENV=development astro build",
     "build:development": "npm run build --workspace @cloudflare/telescope && cross-env CLOUDFLARE_ENV=development astro build",
     "build:staging": "npm run build --workspace @cloudflare/telescope && cross-env CLOUDFLARE_ENV=staging astro build",
     "build:production": "npm run build --workspace @cloudflare/telescope && cross-env CLOUDFLARE_ENV=production astro build",
