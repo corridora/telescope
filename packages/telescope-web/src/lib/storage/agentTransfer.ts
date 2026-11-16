@@ -33,6 +33,7 @@ import {
   IngestionError,
   reviewStoredResult,
   sha256,
+  validateInteractionMetrics,
 } from './resultStore';
 import { tokenMatches } from '@/lib/auth';
 
@@ -348,9 +349,10 @@ async function storedJson<T>(
   resultId: string,
   filename: string,
   parse: (value: unknown) => T,
+  maximumBytes = MAX_MANIFEST_BYTES,
 ): Promise<T> {
   const object = await env.RESULTS_BUCKET.get(`${resultId}/${filename}`);
-  if (!object || object.size > MAX_MANIFEST_BYTES)
+  if (!object || object.size > maximumBytes)
     throw new IngestionError(`Missing or oversized ${filename}`);
   try {
     return parse(await object.json());
@@ -498,6 +500,16 @@ export async function commitAgentTransfer(
         if (!record.files[`${step.artifactBase}/${filename}`])
           throw new IngestionError(`Passed step is missing ${filename}`);
       }
+    }
+    const metricsPath = `${step.artifactBase}/metrics.json`;
+    if (step.kind === 'interaction' && record.files[metricsPath]) {
+      const metrics = await storedJson(
+        record.resultId,
+        metricsPath,
+        value => value,
+        8 * 1024 * 1024,
+      );
+      validateInteractionMetrics(metrics);
     }
   }
   const stepIds = new Set(scenario?.steps.map(step => step.id) ?? []);

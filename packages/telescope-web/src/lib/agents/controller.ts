@@ -438,11 +438,13 @@ export async function handleAgents(context: APIContext): Promise<Response> {
       const parsed = Session.parse(await body(context));
       if (parsed.sessionId !== agent.session_id)
         return json({ error: 'Stale session' }, 409);
-      await env.TELESCOPE_DB.prepare(
-        'UPDATE telescope_agents SET last_seen = ? WHERE id = ?',
+      const updated = await env.TELESCOPE_DB.prepare(
+        "UPDATE telescope_agents SET last_seen = ? WHERE id = ? AND status != 'revoked' AND session_id = ? AND token_hash = ?",
       )
-        .bind(Date.now(), agent.id)
+        .bind(Date.now(), agent.id, parsed.sessionId, agent.token_hash)
         .run();
+      if (!updated.meta.changes)
+        return json({ error: 'Agent credential or session changed' }, 409);
       return json({ success: true });
     }
     if (action === 'claim') {
@@ -452,11 +454,13 @@ export async function handleAgents(context: APIContext): Promise<Response> {
         return json({ error: 'Stale session' }, 409);
       await reconcileAgentJobs();
       const now = Date.now();
-      await env.TELESCOPE_DB.prepare(
-        'UPDATE telescope_agents SET last_seen = ? WHERE id = ?',
+      const touched = await env.TELESCOPE_DB.prepare(
+        "UPDATE telescope_agents SET last_seen = ? WHERE id = ? AND status != 'revoked' AND session_id = ? AND token_hash = ?",
       )
-        .bind(now, agent.id)
+        .bind(now, agent.id, parsed.sessionId, agent.token_hash)
         .run();
+      if (!touched.meta.changes)
+        return json({ error: 'Agent credential or session changed' }, 409);
       if (agent.status !== 'active') return json({ job: null });
       const active = await env.TELESCOPE_DB.prepare(
         "SELECT id FROM telescope_attempts WHERE agent_id = ? AND lease_until > ? AND delivery_state != 'stored' AND execution_state NOT IN ('failed','cancelled','interrupted') LIMIT 1",
@@ -745,8 +749,8 @@ export async function handleAgents(context: APIContext): Promise<Response> {
           agent.token_hash,
         ),
         env.TELESCOPE_DB.prepare(
-          'UPDATE telescope_agents SET last_seen = ? WHERE id = ?',
-        ).bind(now, agent.id),
+          "UPDATE telescope_agents SET last_seen = ? WHERE id = ? AND status != 'revoked' AND session_id = ? AND token_hash = ?",
+        ).bind(now, agent.id, attempt.session_id, agent.token_hash),
         env.TELESCOPE_DB.prepare(
           'UPDATE telescope_jobs SET execution_state = (SELECT execution_state FROM telescope_attempts WHERE id = ?), delivery_state = (SELECT delivery_state FROM telescope_attempts WHERE id = ?), error = (SELECT error FROM telescope_attempts WHERE id = ?), delivery_error=(SELECT delivery_error FROM telescope_attempts WHERE id=?), updated_at = ? WHERE id = ? AND active_attempt_id = ?',
         ).bind(

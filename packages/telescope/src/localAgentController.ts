@@ -412,6 +412,8 @@ export function createLocalAgentController(options: {
     agent: Agent,
     allowStored = false,
   ): Attempt | null => {
+    const currentAgent = authenticate(request);
+    if (!currentAgent || currentAgent.id !== agent.id) return null;
     const id = request.headers.get('x-telescope-attempt') ?? '';
     const token = request.headers.get('x-telescope-lease');
     const session = request.headers.get('x-telescope-session');
@@ -1101,6 +1103,11 @@ export function createLocalAgentController(options: {
               .passthrough(),
           })
           .parse(await requestJson(request));
+        if (!authenticate(request))
+          return json(
+            { error: 'Agent credential changed during request' },
+            401,
+          );
         agent.sessionId = parsed.sessionId;
         agent.capabilities = parsed.capabilities;
         agent.lastSeen = Date.now();
@@ -1116,6 +1123,11 @@ export function createLocalAgentController(options: {
         const parsed = z
           .object({ sessionId: UUID })
           .parse(await requestJson(request));
+        if (!authenticate(request))
+          return json(
+            { error: 'Agent credential changed during request' },
+            401,
+          );
         if (agent.sessionId !== parsed.sessionId)
           return json({ error: 'Stale session' }, 409);
         agent.lastSeen = Date.now();
@@ -1126,6 +1138,11 @@ export function createLocalAgentController(options: {
         const parsed = z
           .object({ sessionId: UUID })
           .parse(await requestJson(request));
+        if (!authenticate(request))
+          return json(
+            { error: 'Agent credential changed during request' },
+            401,
+          );
         if (parsed.sessionId !== agent.sessionId)
           return json({ error: 'Stale session' }, 409);
         const now = Date.now();
@@ -1194,6 +1211,11 @@ export function createLocalAgentController(options: {
             coreTestId: TestIdSchema.optional(),
           })
           .parse(await requestJson(request));
+        if (!authenticate(request))
+          return json(
+            { error: 'Agent credential changed during request' },
+            401,
+          );
         const attempt = state.attempts[parsed.attemptId];
         if (
           !attempt ||

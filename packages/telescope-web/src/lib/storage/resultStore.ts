@@ -97,6 +97,16 @@ export async function sha256(bytes: Uint8Array): Promise<string> {
   ).join('');
 }
 
+/** Prevent interaction intervals from reusing an earlier document's navigation. */
+export function validateInteractionMetrics(value: unknown): void {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new IngestionError('Interaction metrics must be a JSON object');
+  if (Reflect.get(value, 'navigationTiming') != null)
+    throw new IngestionError(
+      'Interaction metrics must not contain inherited navigation timing',
+    );
+}
+
 /** Read a bounded body even when Content-Length is absent or misleading. */
 export async function readRequestBody(
   request: Request,
@@ -195,7 +205,9 @@ export async function parseResultArchive(archive: Uint8Array) {
   }
   let unzipped: Unzipped;
   try {
-    unzipped = unzipSync(archive, { filter: file => !file.name.endsWith('/') });
+    unzipped = unzipSync(archive, {
+      filter: file => !file.name.endsWith('/'),
+    });
   } catch {
     throw new IngestionError('ZIP contents could not be decompressed');
   }
@@ -312,6 +324,25 @@ export async function parseResultArchive(archive: Uint8Array) {
               `Passed step ${step.id} is missing ${filename}`,
             );
         }
+      }
+      const metrics = files[`${step.artifactBase}/metrics.json`];
+      if (step.kind === 'interaction' && metrics) {
+        if (metrics.byteLength > 8 * 1024 * 1024)
+          throw new IngestionError(
+            'Interaction metrics exceed the JSON size limit',
+            413,
+          );
+        let value: unknown;
+        try {
+          value = JSON.parse(
+            new TextDecoder('utf-8', { fatal: true }).decode(metrics),
+          );
+        } catch {
+          throw new IngestionError(
+            `Invalid metrics for interaction step ${step.id}`,
+          );
+        }
+        validateInteractionMetrics(value);
       }
     }
     for (const filename of Object.keys(files)) {
