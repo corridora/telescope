@@ -1,0 +1,31 @@
+---
+import MetricCard from './MetricCard.astro';
+import type { MetricsJson } from '@/lib/types/metrics';
+import type { Har } from '@/lib/types/har';
+
+interface Props {
+  metrics: MetricsJson | null;
+  har: Har | null;
+  durationMs?: number;
+  detailed?: boolean;
+}
+const { metrics, har, durationMs, detailed = false } = Astro.props;
+const entries = har?.log?.entries ?? [];
+const transfer = entries.reduce((total, entry) => total + Math.max(0, entry.response?._transferSize ?? entry.response?.content?.size ?? 0), 0);
+const shifts = metrics?.layoutShifts ?? [];
+---
+
+<MetricCard heading="Interaction interval" metrics={[
+  { label: 'Action duration', value: durationMs === undefined ? null : Math.round(durationMs).toString(), unit: 'ms' },
+  { label: 'Requests started', value: entries.length.toString() },
+  { label: 'Transferred', value: (transfer / 1024).toFixed(1), unit: 'KB' },
+  { label: 'Layout shift events', value: shifts.length.toString() },
+]} />
+<p class="scope-note">These diagnostics cover this action. Document navigation metrics and Core Web Vital ratings do not apply to this interval.</p>
+{detailed && <section>
+  <h3>User timing</h3>
+  {metrics?.userTiming?.length ? <ul>{metrics.userTiming.map(entry => <li>{entry.name}: {entry.duration.toFixed(1)} ms</li>)}</ul> : <p>No user timing entries recorded in this interval.</p>}
+  <h3>Layout shift events</h3>
+  {shifts.length ? <ul>{shifts.map(entry => <li>{entry.startTime.toFixed(1)} ms: {entry.value.toFixed(4)}{entry.hadRecentInput ? ' (recent input)' : ''}</li>)}</ul> : <p>No layout shift events recorded in this interval.</p>}
+</section>}
+<style>.scope-note { color: var(--muted); font-size: .875rem; }</style>

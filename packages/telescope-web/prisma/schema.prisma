@@ -18,6 +18,18 @@ model tests {
   test_date      Int
   browser        String
   content_rating String  @default("unknown")
+  publication_state String @default("committed")
+  visibility String @default("public")
+  execution_status String @default("unknown")
+  run_type String @default("single")
+  step_count Int @default(1)
+  core_test_id String?
+  artifact_prefix String?
+  artifact_manifest String?
+  original_zip_key String?
+  ingestion_token String?
+  ingestion_expires_at Int?
+  ingestion_error String?
   created_at     Int?    @default(dbgenerated("(unixepoch())"))
   updated_at     Int?    @default(dbgenerated("(unixepoch())"))
 
@@ -25,4 +37,115 @@ model tests {
   @@index([content_rating], map: "idx_tests_content_rating")
   @@index([updated_at(sort: Desc)], map: "idx_tests_updated_at")
   @@index([created_at(sort: Desc)], map: "idx_tests_created_at")
+  @@index([publication_state, visibility, created_at(sort: Desc)], map: "idx_tests_publication_visibility")
+}
+
+model telescope_agents {
+  id                String @id
+  name              String
+  token_hash        String @unique
+  status            String @default("active")
+  capabilities_json String @default("{}")
+  session_id        String?
+  last_seen         BigInt?
+  created_at        BigInt
+  jobs              telescope_jobs[]
+  attempts          telescope_attempts[]
+}
+
+model telescope_jobs {
+  id                String @id
+  agent_id          String
+  name              String?
+  description       String?
+  options_json      String
+  secrets_json      String?
+  request_hash      String
+  idempotency_key   String @unique
+  execution_state   String @default("queued")
+  delivery_state    String @default("not_started")
+  active_attempt_id String?
+  cancel_requested  Int @default(0)
+  created_at        BigInt
+  updated_at        BigInt
+  expires_at        BigInt
+  error             String?
+  delivery_error    String?
+  agent             telescope_agents @relation(fields: [agent_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  attempts          telescope_attempts[]
+
+  @@index([agent_id, execution_state, created_at], map: "telescope_jobs_claim")
+}
+
+model telescope_attempts {
+  id              String @id
+  job_id          String
+  agent_id        String
+  session_id      String
+  lease_hash      String
+  lease_until     BigInt
+  execution_state String @default("claimed")
+  delivery_state  String @default("not_started")
+  event_sequence  Int @default(0)
+  progress_json   String?
+  core_test_id    String?
+  result_id       String @unique
+  receipt_json    String?
+  error           String?
+  delivery_error  String?
+  created_at      BigInt
+  updated_at      BigInt
+  job             telescope_jobs @relation(fields: [job_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  agent           telescope_agents @relation(fields: [agent_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([lease_until, delivery_state], map: "telescope_attempts_lease")
+  @@index([job_id, created_at], map: "telescope_attempts_job")
+}
+
+model upload_forward_deliveries {
+  delivery_id        String @id
+  test_id            String
+  archive_key        String
+  archive_sha256     String
+  archive_size       BigInt
+  filename           String
+  metadata_json      String
+  destination_url    String
+  destination_label  String
+  config_version     String
+  settings_json      String
+  instance_chain     String
+  state              String
+  attempt_count      Int @default(0)
+  retry_budget_start BigInt @default(0)
+  created_at         BigInt
+  updated_at         BigInt
+  next_attempt_at    BigInt
+  source_expires_at  BigInt
+  lease_token        String?
+  lease_expires_at   BigInt?
+  last_status        Int?
+  last_error         String?
+  receipt_json       String?
+  terminal_at        BigInt?
+  archive_deleted_at BigInt?
+  cancel_requested   Int @default(0)
+
+  @@unique([test_id, config_version])
+  @@index([state, next_attempt_at], map: "upload_forward_due")
+  @@index([test_id], map: "upload_forward_test")
+}
+
+model upload_forward_attempts {
+  attempt_id  String @id
+  delivery_id String
+  sequence    Int
+  started_at  BigInt
+  ended_at    BigInt?
+  outcome     String
+  status      Int?
+  error       String?
+
+  @@unique([delivery_id, sequence])
+  @@index([delivery_id, sequence], map: "upload_forward_attempt_delivery")
 }

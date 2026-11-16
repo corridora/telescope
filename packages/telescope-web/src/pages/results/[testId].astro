@@ -13,6 +13,11 @@ import Resources from '@/components/Resources.astro';
 import Console from '@/components/Console.astro';
 import Bottlenecks from '@/components/Bottlenecks.astro';
 import ConfigTab from '@/components/ConfigTab.astro';
+import ScenarioSteps from '@/components/ScenarioSteps.astro';
+import IntervalMetrics from '@/components/IntervalMetrics.astro';
+import { ScenarioManifestSchema } from '@cloudflare/telescope/contracts';
+import type { ScenarioManifest, ScenarioStepResult } from '@cloudflare/telescope/contracts';
+import { listForwarding } from '@/lib/forwarding/service';
 
 import { getPrismaClient } from '@/lib/prisma/client';
 import { getTestById } from '@/lib/repositories/testRepository';
@@ -46,6 +51,7 @@ const test = await getTestById(prisma, testId);
 if (!test) {
   return Astro.redirect('/results');
 }
+const deliveries = Astro.locals.isAdmin ? await listForwarding(env, testId, 5) : [];
 
 const isUnsafe = aiEnabled && test.content_rating === ContentRating.UNSAFE;
 const isUnknown =
@@ -68,16 +74,39 @@ let fcp = getFcp(null);
 let ttfb = getTtfb(null);
 let transferBytes = extractTransferSize(null);
 let durationMs = extractDuration(null);
+let scenario: ScenarioManifest | null = null;
+let selectedStep: ScenarioStepResult | undefined;
+let scenarioError: string | null = null;
+let artifactBase = '';
+let displayUrl = test.url;
 
 if (!isUnsafe && !isUnknown) {
+  const scenarioObject = await env.RESULTS_BUCKET.get(`${testId}/scenario.json`);
+  if (scenarioObject) {
+    try {
+      scenario = ScenarioManifestSchema.parse(await scenarioObject.json());
+      const requestedStep = Astro.url.searchParams.get('step');
+      selectedStep = scenario.steps.find(step => step.id === requestedStep)
+        ?? scenario.steps.find(step => step.status === 'failed')
+        ?? scenario.steps[0];
+      artifactBase = `${selectedStep.artifactBase}/`;
+      displayUrl = selectedStep.endingUrl ?? selectedStep.startingUrl ?? test.url;
+      if (!/^https?:\/\//i.test(displayUrl)) displayUrl = test.url;
+    } catch {
+      scenarioError = 'This journey uses an unsupported or invalid scenario format.';
+    }
+  }
+}
+
+if (!isUnsafe && !isUnknown && !scenarioError) {
   // --- Screenshot ---
-  const screenshotKey = `${testId}/screenshot.png`;
+  const screenshotKey = `${testId}/${artifactBase}screenshot.png`;
   const screenshotObj = await env.RESULTS_BUCKET.head(screenshotKey);
-  screenshotUrl = screenshotObj ? `/api/tests/${testId}/screenshot.png` : null;
+  screenshotUrl = screenshotObj ? `/api/tests/${testId}/${artifactBase}screenshot.png` : null;
 
   // --- HAR (browser version + existence check for Waterfall) ---
   try {
-    const harObj = await env.RESULTS_BUCKET.get(`${testId}/pageload.har`);
+    const harObj = await env.RESULTS_BUCKET.get(`${testId}/${artifactBase}pageload.har`);
     if (harObj) {
       hasHar = true;
       har = await harObj.json<Har>();
@@ -90,7 +119,7 @@ if (!isUnsafe && !isUnknown) {
 
   // --- Metrics ---
   try {
-    const metricsObj = await env.RESULTS_BUCKET.get(`${testId}/metrics.json`);
+    const metricsObj = await env.RESULTS_BUCKET.get(`${testId}/${artifactBase}metrics.json`);
     if (metricsObj) {
       metrics = await metricsObj.json<MetricsJson>();
     }
@@ -102,7 +131,7 @@ if (!isUnsafe && !isUnknown) {
   // --- Resources ---
   try {
     const resourcesObj = await env.RESULTS_BUCKET.get(
-      `${testId}/resources.json`,
+      `${testId}/${artifactBase}resources.json`,
     );
     if (resourcesObj) {
       resources = await resourcesObj.json<ResourceTiming[]>();
@@ -114,7 +143,7 @@ if (!isUnsafe && !isUnknown) {
 
   // --- Console Messages ---
   try {
-    const consoleObj = await env.RESULTS_BUCKET.get(`${testId}/console.json`);
+    const consoleObj = await env.RESULTS_BUCKET.get(`${testId}/${artifactBase}console.json`);
     if (consoleObj) {
       consoleMessages = await consoleObj.json<ConsoleMessage[]>();
     }
@@ -214,10 +243,18 @@ if (!isUnsafe) {
             )}
           </div>
 
+          {scenarioError && <p class="banner banner-pending">{scenarioError}</p>}
+          {scenario && <ScenarioSteps scenario={scenario} selectedStepId={selectedStep?.id} />}
+          {deliveries.length > 0 && <section class="banner banner-pending" aria-label="Forwarding delivery">
+            <strong>Saved on this instance</strong>
+            {deliveries.map(delivery => <p>{delivery.destinationLabel}: {delivery.state}{delivery.error ? ` — ${delivery.error}` : ''}</p>)}
+            <a href="/forwarding">Manage forwarding</a>
+          </section>}
+
           <section class="overview-section">
             <TestInfoPanel
               testId={testId}
-              url={test.url}
+              url={displayUrl}
               browser={test.browser}
               browserVersion={harBrowser?.version ?? null}
               formattedDate={formattedDate}
@@ -225,13 +262,15 @@ if (!isUnsafe) {
 
             <ScreenshotDisplay
               screenshotUrl={screenshotUrl}
-              alt={`Screenshot of ${test.url}`}
+              alt={`Screenshot of ${displayUrl}`}
             />
           </section>
 
           <Tabs>
             <div slot="summary">
-              {metrics ? (
+              {selectedStep?.kind === 'interaction' ? (
+                <IntervalMetrics metrics={metrics} har={har} durationMs={selectedStep.durationMs} />
+              ) : metrics ? (
                 <div class="metrics-row">
                   <MetricCard
                     heading="Core Web Vitals"
@@ -285,7 +324,9 @@ if (!isUnsafe) {
             </div>
 
             <div slot="all-metrics">
-              {metrics ? (
+              {selectedStep?.kind === 'interaction' ? (
+                <IntervalMetrics metrics={metrics} har={har} durationMs={selectedStep.durationMs} detailed />
+              ) : metrics ? (
                 <AllMetrics metrics={metrics} />
               ) : (
                 <div class="metrics-unavailable panel">
@@ -295,18 +336,18 @@ if (!isUnsafe) {
             </div>
 
             <div slot="waterfall">
-              <Waterfall testId={testId} hasHar={hasHar} />
+              <Waterfall testId={testId} hasHar={hasHar} artifactBase={artifactBase} />
             </div>
 
             <div slot="filmstrip-video">
-              <FilmstripVideo testId={testId} metrics={metrics} />
+              {!scenarioError && <FilmstripVideo testId={testId} metrics={metrics} artifactBase={artifactBase} />}
             </div>
 
             <div slot="resources">
               {resources.length > 0 || metrics?.navigationTiming ? (
                 <Resources
                   resources={resources}
-                  url={test.url}
+                  url={displayUrl}
                   navigationTiming={metrics?.navigationTiming}
                 />
               ) : (
@@ -320,7 +361,7 @@ if (!isUnsafe) {
               {resources.length > 0 ? (
                 <Bottlenecks
                   resources={resources}
-                  url={test.url}
+                  url={displayUrl}
                   navigationTiming={metrics?.navigationTiming}
                   har={har}
                 />
@@ -336,7 +377,7 @@ if (!isUnsafe) {
             </div>
 
             <div slot="config">
-              <ConfigTab testId={testId} config={config} hasHar={hasHar} />
+              <ConfigTab testId={testId} config={config} hasHar={hasHar} artifactBase={artifactBase} />
             </div>
           </Tabs>
         </>

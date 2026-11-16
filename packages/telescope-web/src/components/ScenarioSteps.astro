@@ -1,0 +1,42 @@
+---
+import type { ScenarioManifest } from '@cloudflare/telescope/contracts';
+
+interface Props {
+  scenario: ScenarioManifest;
+  selectedStepId?: string;
+}
+const { scenario, selectedStepId } = Astro.props;
+---
+
+<section class="scenario" aria-label="Scripted journey">
+  <div class="journey-heading">
+    <h2>{scenario.name ?? 'Scripted journey'}</h2>
+    <span>{scenario.status} · {scenario.steps.length} steps · {Math.round(scenario.durationMs)} ms</span>
+  </div>
+  {scenario.error && <p class="error">{scenario.error}</p>}
+  <nav aria-label="Measured test steps">
+    <ol>
+      {scenario.steps.map(step => (
+        <li>
+          <a href={`?step=${step.id}`} aria-current={step.id === selectedStepId ? 'step' : undefined}>
+            <strong>{step.order + 1}. {step.name}</strong>
+            <span>{step.kind} · {step.status}{step.durationMs === undefined ? '' : ` · ${Math.round(step.durationMs)} ms`}</span>
+            {step.error && <span class="error">{step.error}</span>}
+          </a>
+        </li>
+      ))}
+    </ol>
+  </nav>
+</section>
+
+<style>
+  .scenario { border: 1px solid var(--border); padding: 1.25rem; border-radius: .75rem; margin-bottom: 1.5rem; }
+  .journey-heading { display: flex; gap: 1rem; align-items: baseline; flex-wrap: wrap; }
+  h2 { margin: 0; }
+  ol { display: flex; gap: .75rem; flex-wrap: wrap; padding: 0; list-style: none; }
+  li { flex: 1 1 12rem; }
+  a { display: grid; gap: .4rem; border: 1px solid var(--border); padding: .75rem; border-radius: .5rem; text-decoration: none; color: inherit; }
+  a[aria-current] { outline: 2px solid var(--accent, #2563eb); }
+  span { font-size: .85rem; color: var(--muted); }
+  .error { color: #b91c1c; overflow-wrap: anywhere; }
+</style>

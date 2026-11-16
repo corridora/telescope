@@ -1,15 +1,16 @@
 ---
-import { env } from 'cloudflare:workers';
-
+import { createResultStore } from '@/lib/storage/resultStore';
 import type { MetricsJson } from '@/lib/types/metrics';
 interface Props {
   testId: string;
   metrics: MetricsJson | null;
+  artifactBase?: string;
 }
-const { testId, metrics } = Astro.props;
+const { testId, metrics, artifactBase = '' } = Astro.props;
+const store = createResultStore();
 let frameRate = 1;
 try {
-  const configObj = await env.RESULTS_BUCKET.get(`${testId}/config.json`);
+  const configObj = await store.get(testId, 'config.json');
   if (configObj) {
     const config = await configObj.json<{ options?: { frameRate?: number } }>();
     frameRate = config?.options?.frameRate || 1;
@@ -17,17 +18,10 @@ try {
 } catch (error) {
   console.error('Error reading config.json:', error);
 }
-const fcpMs = metrics?.paintTiming?.find(
-  p => p.name === 'first-contentful-paint',
-)?.startTime;
-const lcpEntry =
-  metrics?.largestContentfulPaint?.[metrics.largestContentfulPaint.length - 1];
-const lcpMs =
-  lcpEntry?.renderTime && lcpEntry.renderTime > 0
-    ? lcpEntry.renderTime
-    : lcpEntry?.startTime;
-const layoutShifts =
-  metrics?.layoutShifts?.filter(s => !s.hadRecentInput) || [];
+const fcpMs = metrics?.paintTiming?.find(p => p.name === 'first-contentful-paint')?.startTime;
+const lcpEntry = metrics?.largestContentfulPaint?.at(-1);
+const lcpMs = lcpEntry?.renderTime && lcpEntry.renderTime > 0 ? lcpEntry.renderTime : lcpEntry?.startTime;
+const layoutShifts = metrics?.layoutShifts?.filter(s => !s.hadRecentInput) || [];
 interface FilmstripFrame {
   filename: string;
   frameNum: number;
@@ -41,52 +35,31 @@ interface FilmstripFrame {
 let filmstripFrames: FilmstripFrame[] = [];
 let videoUrl: string | null = null;
 try {
-  const listed = await env.RESULTS_BUCKET.list({ prefix: `${testId}/` });
-  const frames = listed.objects
-    .filter(
-      obj =>
-        obj.key.includes('/filmstrip/') &&
-        (obj.key.endsWith('.jpg') || obj.key.endsWith('.png')),
-    )
-    .map(obj => {
-      const filename = obj.key.split('/').pop() || '';
-      const match = filename.match(/frame_\d+x\d+_(\d+)\.(jpg|png)/);
-      const frameNum = match ? parseInt(match[1], 10) : 0;
-      return {
-        filename,
-        frameNum,
-        url: `/api/tests/${testId}/filmstrip/${filename}`,
-      };
-    })
-    .sort((a, b) => a.frameNum - b.frameNum);
+  const names = await store.list(testId);
+  const framePrefix = `${artifactBase}filmstrip/`;
+  const frames = names.filter(name => name.startsWith(framePrefix) &&
+    !name.slice(framePrefix.length).includes('/') && /\.(jpg|png)$/.test(name)).map(name => {
+      const filename = name.slice(framePrefix.length);
+      const match = filename.match(/(\d+)\.(?:jpg|png)$/);
+      return { filename, frameNum: match ? Number.parseInt(match[1], 10) : 0,
+        url: `/api/tests/${testId}/${name}` };
+    }).sort((a, b) => a.frameNum - b.frameNum);
   filmstripFrames = frames.map(frame => {
-    // try to calculate filmstrip timestamps, assumes frame # happens at # second.
-    // to get more precise framerates, also store video duration.
-    const ms = Math.floor(((frame.frameNum - 1) * 1000) / frameRate);
+    const ms = Math.max(0, Math.floor(((frame.frameNum - 1) * 1000) / frameRate));
     const timeLabel = ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
-    // tolerance is half frame interval, use this to determine highlights
     const tolerance = 1000 / frameRate / 2;
-    const isFcp =
-      fcpMs !== null && fcpMs !== undefined && Math.abs(ms - fcpMs) < tolerance;
-    const isLcp =
-      lcpMs !== null && lcpMs !== undefined && Math.abs(ms - lcpMs) < tolerance;
-    const hasShift = layoutShifts.some(
-      shift => Math.abs(ms - shift.startTime) < tolerance,
-    );
-    return { ...frame, ms, timeLabel, isFcp, isLcp, hasShift };
+    return { ...frame, ms, timeLabel,
+      isFcp: fcpMs !== undefined && Math.abs(ms - fcpMs) < tolerance,
+      isLcp: lcpMs !== undefined && Math.abs(ms - lcpMs) < tolerance,
+      hasShift: layoutShifts.some(shift => Math.abs(ms - shift.startTime) < tolerance) };
   });
-  const videoFile = listed.objects.find(
-    obj =>
-      obj.key.startsWith(`${testId}/`) &&
-      !obj.key.includes('/filmstrip/') &&
-      obj.key.endsWith('.webm'),
-  );
-  if (videoFile) {
-    videoUrl = `/api/tests/${testId}/${videoFile.key.replace(`${testId}/`, '')}`;
-  }
+  const video = names.find(name => name.startsWith(artifactBase) &&
+    !name.slice(artifactBase.length).includes('/') && name.endsWith('.webm'));
+  if (video) videoUrl = `/api/tests/${testId}/${video}`;
 } catch (error) {
   console.error('Error loading filmstrip/video:', error);
 }
+
 ---
 
 <div class="filmstrip-video-container">

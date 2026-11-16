@@ -8,6 +8,7 @@ import Page from '@/layouts/Page.astro';
     Upload an existing test result as a ZIP file to view it in the web UI.
   </h2>
   <div class="overview-section">
+    <p id="forwarding-disclosure" hidden></p>
     <form id="upload-form" class="upload-form">
       <!-- Always sends "upload" as source-->
       <input type="hidden" name="source" value="upload" />
@@ -260,6 +261,15 @@ import Page from '@/layouts/Page.astro';
 </style>
 
 <script>
+  void fetch('/api/forwarding/status').then(async response => {
+    if (!response.ok) return;
+    const forwarding = await response.json() as { enabled?: boolean; destinationLabel?: string };
+    const disclosure = document.getElementById('forwarding-disclosure');
+    if (forwarding.enabled && disclosure) {
+      disclosure.textContent = `Accepted original ZIP files are also forwarded to ${forwarding.destinationLabel ?? 'the instance destination'} after local storage and any required review. Local results remain available independently.`;
+      disclosure.hidden = false;
+    }
+  }).catch(() => undefined);
   const form = document.getElementById('upload-form') as HTMLFormElement;
   const fileInput = document.getElementById('file-upload') as HTMLInputElement;
   const fileUploadArea = document.getElementById(

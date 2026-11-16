@@ -1,0 +1,113 @@
+---
+import { DEFAULT_OPTIONS } from '@cloudflare/telescope/defaults';
+
+interface Props {
+  mode: 'agents' | 'run' | 'job';
+  jobId?: string;
+}
+const { mode, jobId = '' } = Astro.props;
+---
+
+<section id="agent-workspace" data-mode={mode} data-job-id={jobId}>
+  <nav class="workspace-links"><a href="/run">Run test</a><a href="/agents">Agents</a><a href="/results">Saved results</a></nav>
+  <form id="agent-login" class="panel">
+    <h2>Instance administrator</h2>
+    <p>Sign in to manage agents and run private tests. The administrator token is configured on this web UI instance.</p>
+    <label>Administrator token<input id="agent-admin-token" type="password" autocomplete="current-password" required /></label>
+    <button type="submit">Sign in</button>
+  </form>
+  <p id="agent-notice" role="status" aria-live="polite"></p>
+  <div id="agent-content" hidden>
+    {mode === 'agents' && <>
+      <form id="enroll-agent" class="panel">
+        <h2>Enroll an agent</h2>
+        <label>Agent name<input name="name" required maxlength="100" placeholder="Office runner" /></label>
+        <button type="submit">Create agent credential</button>
+        <div id="agent-credential" hidden>
+          <p>Save this credential to a private file on the agent. It is shown once.</p>
+          <textarea id="agent-credential-value" readonly rows="3" aria-label="New agent credential"></textarea>
+          <p>Start the agent with <code>telescope agent --controller https://your-instance --tokenFile ./agent.token --allowHosts example.com</code>. The allowlist is controlled by the agent operator.</p>
+        </div>
+      </form>
+      <section class="panel"><h2>Agents</h2><div id="agent-list"></div></section>
+    </>}
+    {mode === 'run' && <>
+      <form id="remote-run" class="panel">
+        <h2>Run on a remote agent</h2>
+        <label>URL<input name="url" type="url" required placeholder="https://example.com" /></label>
+        <p class="hint">The selected agent reaches this address. Localhost and private addresses refer to its network.</p>
+        <div class="form-grid">
+          <label>Agent<select name="agentId" id="run-agent" required></select></label>
+          <label>Browser<select name="browser" id="run-browser" required></select></label>
+          <label>Device (optional)<input name="device" list="remote-devices" maxlength="200" placeholder="Playwright device name" /><datalist id="remote-devices"></datalist></label>
+          <label>Trusted journey<select name="scriptId" id="run-script"><option value="">Single-page test</option></select></label>
+          <label>Test name<input name="name" maxlength="200" /></label>
+          <label>Timeout in milliseconds<input name="timeout" type="number" min="1" max="300000" value={DEFAULT_OPTIONS.timeout} required /></label>
+        </div>
+        <label>Description<textarea name="description" maxlength="4000" rows="2"></textarea></label>
+        <details><summary>Advanced options</summary><p class="hint">JSON test settings such as width, height, headers, or blocking. Output paths, uploads, scripts, and shell commands are controlled by the service.</p><textarea name="advanced" rows="5" spellcheck="false">{}</textarea></details>
+        <button type="submit">Run test</button>
+      </form>
+      <section class="panel"><h2>Recent runs</h2><div id="remote-job-list"></div></section>
+    </>}
+    {mode === 'job' && <section class="panel">
+      <h2>Remote run</h2><p class="hint">Job <code>{jobId}</code></p>
+      <div id="remote-job-detail"></div>
+      <div class="actions"><button id="cancel-remote-job">Cancel run</button><button id="retry-remote-job">Retry failed run</button></div>
+      <h3>Execution attempts</h3><div id="remote-attempt-list"></div>
+    </section>}
+    <button id="agent-logout" class="secondary">Sign out</button>
+  </div>
+</section>
+
+<style>
+  .workspace-links,.actions{display:flex;gap:1rem;flex-wrap:wrap;margin:1rem 0}.panel{padding:1.5rem;margin:1.25rem 0;border:1px solid var(--border,#d2d7df);border-radius:.75rem;background:var(--panel,#fff)}h2{margin-top:0}form label{display:grid;gap:.4rem;margin:.9rem 0;font-weight:600}input,select,textarea{width:100%;box-sizing:border-box;font:inherit;padding:.65rem;border:1px solid var(--border,#aab2be);border-radius:.4rem;background:var(--bg,#fff);color:inherit}textarea{resize:vertical}.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:0 1rem}button{padding:.65rem 1rem;border:1px solid var(--border,#8793a5);border-radius:.4rem;background:var(--panel,#eef2f8);color:inherit;cursor:pointer;margin-top:.5rem}button:disabled{opacity:.5;cursor:default}.hint{font-size:.9rem;opacity:.78}#agent-notice{min-height:1.5rem;white-space:pre-wrap}#agent-credential-value{font-family:monospace}section :global(.entry){padding:1rem 0;border-bottom:1px solid var(--border,#d2d7df)}section :global(.entry:last-child){border-bottom:0}section :global(.entry p){margin:.4rem 0}section :global(.entry-actions){display:flex;gap:.7rem;flex-wrap:wrap}section :global(.error){color:#b42318;white-space:pre-wrap}section :global(.status){font-weight:650}a{color:var(--accent,#245bbb)}code{overflow-wrap:anywhere}details{margin:1rem 0}
+</style>
+
+<script>
+  const root = document.querySelector<HTMLElement>('#agent-workspace');
+  if (root) {
+    const mode = root.dataset.mode;
+    const jobId = root.dataset.jobId ?? '';
+    const login = document.querySelector<HTMLFormElement>('#agent-login')!;
+    const content = document.querySelector<HTMLElement>('#agent-content')!;
+    const notice = document.querySelector<HTMLElement>('#agent-notice')!;
+    let agents: Array<{id:string;name:string;status:string;online:boolean;lastSeen:number|null;capabilities:{browsers?:string[];devices?:string[];scripts?:Array<{id:string;name?:string;sha256:string}>;platform?:string;architecture?:string}}> = [];
+    let requestKey = crypto.randomUUID();
+    let authenticated = false;
+    let refreshing = false;
+    function say(value: string, error = false) { notice.textContent = value; notice.style.color = error ? '#b42318' : ''; }
+    async function api(url: string, method = 'GET', data?: unknown, headers?: Record<string,string>): Promise<Record<string, unknown>> {
+      const response = await fetch(url, {method, credentials:'same-origin', headers: data === undefined ? headers : {'Content-Type':'application/json',...headers}, body:data === undefined ? undefined : JSON.stringify(data)});
+      const value = await response.json();
+      if (!response.ok) throw new Error(value.error ?? `Request failed (${response.status})`);
+      return value;
+    }
+    function element(tag: string, text: string, className?:string) { const node=document.createElement(tag);node.textContent=text;if(className)node.className=className;return node; }
+    function link(text:string,url:string) { const node=document.createElement('a');node.textContent=text;node.href=url;return node; }
+    function action(text:string,callback:()=>Promise<void>) {const button=document.createElement('button');button.textContent=text;button.addEventListener('click',()=>{button.disabled=true;void callback().catch(error=>say(error.message,true)).finally(()=>button.disabled=false);});return button;}
+    function agentSelectors() {
+      const select=document.querySelector<HTMLSelectElement>('#run-agent');
+      if(!select)return;
+      const previous=select.value;
+      select.replaceChildren();
+      for(const agent of agents.filter(item=>item.status==='active')){const option=document.createElement('option');option.value=agent.id;option.textContent=`${agent.name} — ${agent.online?'online':'offline; queued until reconnect'}`;select.append(option);}
+      if(agents.some(agent=>agent.id===previous))select.value=previous;
+      browsers();
+    }
+    function browsers(){const select=document.querySelector<HTMLSelectElement>('#run-agent');const browser=document.querySelector<HTMLSelectElement>('#run-browser');if(!select||!browser)return;const capabilities=agents.find(agent=>agent.id===select.value)?.capabilities;const previous=browser.value;browser.replaceChildren();for(const name of capabilities?.browsers??[]){const option=document.createElement('option');option.value=name;option.textContent=name;browser.append(option);}if([...browser.options].some(option=>option.value===previous))browser.value=previous;const devices=document.querySelector('#remote-devices');devices?.replaceChildren();for(const name of capabilities?.devices??[]){const option=document.createElement('option');option.value=name;devices?.append(option);}const scriptSelect=document.querySelector<HTMLSelectElement>('#run-script');if(scriptSelect){const selected=scriptSelect.value;scriptSelect.replaceChildren();const empty=document.createElement('option');empty.value='';empty.textContent='Single-page test';scriptSelect.append(empty);for(const script of capabilities?.scripts??[]){const option=document.createElement('option');option.value=script.id;option.dataset.hash=script.sha256;option.textContent=script.name??script.id;scriptSelect.append(option);}if([...scriptSelect.options].some(option=>option.value===selected))scriptSelect.value=selected;}}
+    async function refreshAgents(){const data=await api('/api/agents');agents=data.agents as typeof agents;const list=document.querySelector('#agent-list');if(list){list.replaceChildren();if(!agents.length)list.append(element('p','No agents enrolled yet.'));for(const agent of agents){const entry=element('div','','entry');entry.append(element('h3',agent.name),element('p',`${agent.status} · ${agent.online?'online':'offline'} · ${agent.capabilities.platform??'not registered'} ${agent.capabilities.architecture??''}`),element('p',`Browsers: ${(agent.capabilities.browsers??[]).join(', ')||'none reported'}`),element('p',`Last contact: ${agent.lastSeen?new Date(agent.lastSeen).toLocaleString():'never'}`));if(agent.status!=='revoked'){const controls=element('div','','entry-actions');controls.append(action(agent.status==='draining'?'Activate':'Drain',async()=>{await api(`/api/agents/${agent.id}/${agent.status==='draining'?'activate':'drain'}`,'POST',{});await refreshAgents();}),action('Revoke credential',async()=>{if(!confirm('Revoke this agent credential? Saved results will remain available.'))return;await api(`/api/agents/${agent.id}/revoke`,'POST',{});await refreshAgents();}));entry.append(controls);}list.append(entry);}}agentSelectors();}
+    async function refreshJobs(){const list=document.querySelector('#remote-job-list');if(!list)return;const data=await api('/api/runs');list.replaceChildren();const jobs=data.jobs as Array<{id:string;name?:string;execution_state:string;delivery_state:string;created_at:number;agent_name:string}>;if(!jobs.length)list.append(element('p','No remote runs yet.'));for(const job of jobs){const entry=element('div','','entry');entry.append(link(job.name||job.id,`/runs/${job.id}`),element('p',`${job.execution_state} · delivery ${job.delivery_state} · ${job.agent_name}`),element('p',new Date(job.created_at).toLocaleString()));list.append(entry);}}
+    async function refreshJob(){const detail=document.querySelector('#remote-job-detail');if(!detail)return;const data=await api(`/api/runs/${encodeURIComponent(jobId)}`);const job=data.job as {name?:string;execution_state:string;delivery_state:string;error?:string;cancel_requested:number};detail.replaceChildren(element('h3',job.name||'Unnamed test'),element('p',`Execution: ${job.execution_state}`,'status'),element('p',`Result delivery: ${job.delivery_state}`));if(job.cancel_requested)detail.append(element('p','Cancellation requested. The agent will stop or the execution lease will expire.'));if(job.error)detail.append(element('p',job.error,'error'));const cancel=document.querySelector<HTMLButtonElement>('#cancel-remote-job')!;cancel.disabled=['passed','failed','cancelled','interrupted'].includes(job.execution_state);document.querySelector<HTMLButtonElement>('#retry-remote-job')!.disabled=!['failed','cancelled','interrupted'].includes(job.execution_state);const list=document.querySelector('#remote-attempt-list')!;list.replaceChildren();for(const attempt of data.attempts as Array<{id:string;execution_state:string;delivery_state:string;error?:string;created_at:number;receipt?:{resultId:string};progress?:{phase:string}}>){const entry=element('div','','entry');entry.append(element('p',`${new Date(attempt.created_at).toLocaleString()} · ${attempt.execution_state} · ${attempt.delivery_state}`));if(attempt.progress)entry.append(element('p',`Phase: ${attempt.progress.phase}`));if(attempt.error)entry.append(element('p',attempt.error,'error'));if(attempt.delivery_state==='stored'&&attempt.receipt?.resultId)entry.append(link('Open saved result',`/results/${encodeURIComponent(attempt.receipt.resultId)}`));list.append(entry);}}
+    async function refresh(){if(!authenticated||refreshing)return;refreshing=true;try{if(mode==='job')await refreshJob();else{await refreshAgents();if(mode==='run')await refreshJobs();}}catch(error){say((error as Error).message,true);}finally{refreshing=false;}}
+    login.addEventListener('submit',event=>{event.preventDefault();const input=document.querySelector<HTMLInputElement>('#agent-admin-token')!;void api('/api/session','POST',{token:input.value}).then(()=>{input.value='';authenticated=true;login.hidden=true;content.hidden=false;say('Signed in.');return refresh();}).catch(error=>say(error.message,true));});
+    document.querySelector('#agent-logout')?.addEventListener('click',()=>{void api('/api/session','DELETE').then(()=>{authenticated=false;content.hidden=true;login.hidden=false;say('Signed out.');}).catch(error=>say(error.message,true));});
+    document.querySelector<HTMLFormElement>('#enroll-agent')?.addEventListener('submit',event=>{event.preventDefault();const form=event.currentTarget as HTMLFormElement;const button=form.querySelector('button')!;button.disabled=true;void api('/api/agents','POST',{name:new FormData(form).get('name')}).then(data=>{document.querySelector<HTMLTextAreaElement>('#agent-credential-value')!.value=String(data.token);document.querySelector<HTMLElement>('#agent-credential')!.hidden=false;return refreshAgents();}).catch(error=>say(error.message,true)).finally(()=>button.disabled=false);});
+    const runForm=document.querySelector<HTMLFormElement>('#remote-run');runForm?.addEventListener('input',()=>requestKey=crypto.randomUUID());runForm?.addEventListener('submit',event=>{event.preventDefault();const form=event.currentTarget as HTMLFormElement;const button=form.querySelector('button')!;button.disabled=true;void(async()=>{const fields=new FormData(form);let advanced:unknown;try{advanced=JSON.parse(String(fields.get('advanced')||'{}'));}catch{throw new Error('Advanced options must be valid JSON');}if(!advanced||typeof advanced!=='object'||Array.isArray(advanced))throw new Error('Advanced options must be a JSON object');const scriptSelect=document.querySelector<HTMLSelectElement>('#run-script');const script=scriptSelect?.value?{scriptId:scriptSelect.value,scriptHash:scriptSelect.selectedOptions[0].dataset.hash}:{};const data=await api('/api/runs','POST',{agentId:fields.get('agentId'),name:fields.get('name')||undefined,description:fields.get('description')||undefined,options:{...advanced,...script,url:fields.get('url'),browser:fields.get('browser'),device:fields.get('device')||undefined,timeout:Number(fields.get('timeout'))}},{'Idempotency-Key':requestKey});window.location.href=`/runs/${encodeURIComponent(String(data.jobId))}`;})().catch(error=>say(error.message,true)).finally(()=>button.disabled=false);});
+    document.querySelector('#run-agent')?.addEventListener('change',browsers);
+    document.querySelector('#cancel-remote-job')?.addEventListener('click',()=>{void api(`/api/runs/${encodeURIComponent(jobId)}/cancel`,'POST',{}).then(refreshJob).catch(error=>say(error.message,true));});
+    document.querySelector('#retry-remote-job')?.addEventListener('click',()=>{if(!confirm('Start a new attempt? Target actions from the previous run may already have occurred.'))return;void api(`/api/runs/${encodeURIComponent(jobId)}/retry`,'POST',{}).then(refreshJob).catch(error=>say(error.message,true));});
+    void api('/api/session').then(data=>{if(!data.configured)say('Configure TELESCOPE_ADMIN_TOKEN on this instance before enabling remote execution.',true);if(data.authenticated){authenticated=true;login.hidden=true;content.hidden=false;return refresh();}}).catch(error=>say(error.message,true));
+    setInterval(()=>{if(!document.hidden)void refresh();},4000);
+  }
+</script>

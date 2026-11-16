@@ -1,0 +1,9 @@
+---
+import Page from '@/layouts/Page.astro';
+import AgentWorkspace from '@/components/AgentWorkspace.astro';
+
+export const prerender = false;
+Astro.response.headers.set('Cache-Control', 'no-store');
+---
+
+<Page title="Run a test"><h1>Run a test</h1><AgentWorkspace mode="run" /></Page>

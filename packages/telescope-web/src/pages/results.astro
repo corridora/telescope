@@ -19,7 +19,7 @@ const viewLayout =
 // Fetch all tests from D1
 const aiEnabled = env.ENABLE_AI_RATING === 'true';
 const prisma = getPrismaClient(Astro);
-const tests = await getAllTests(prisma, aiEnabled);
+const tests = await getAllTests(prisma, aiEnabled, Astro.locals.isAdmin);
 
 // get proper interface with screenshot
 type TestWithScreenshot = Tests & {

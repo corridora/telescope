@@ -5,9 +5,10 @@ interface Props {
   testId: string;
   config: ConfigJson | null;
   hasHar: boolean;
+  artifactBase?: string;
 }
 
-const { testId, config, hasHar } = Astro.props;
+const { testId, config, hasHar, artifactBase = '' } = Astro.props;
 
 // Extract test-shaping options to display
 const testOptions: Array<{ label: string; value: string | null }> = [];
@@ -197,9 +198,10 @@ const sanitizedConfig = config ? {
                 </svg>
                 Download ZIP
               </a>
+              {artifactBase && <a href={`/api/tests/${testId}/pageload.har`} class="action-btn" download={`${testId}-session.har`}>Download full session HAR</a>}
               {hasHar && (
                 <a
-                  href={`/api/tests/${testId}/pageload.har`}
+                  href={`/api/tests/${testId}/${artifactBase}pageload.har`}
                   class="action-btn"
                   download={`${testId}.har`}
                 >

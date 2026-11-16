@@ -18,6 +18,43 @@ export enum ContentRating {
   IN_PROGRESS = 'in_progress', // in process of running an AI rating, prevents duplicate jobs
 }
 
+export type PublicationState = 'staging' | 'committed' | 'failed';
+export type ResultVisibility = 'public' | 'private';
+
+/** Integrity metadata for a durably stored result artifact. */
+export interface StoredArtifact {
+  size: number;
+  sha256: string;
+}
+
+/** Server-owned fence checked atomically when an agent result is published. */
+export interface AgentCommitGuard {
+  jobId: string;
+  attemptId: string;
+  agentId: string;
+  sessionId: string;
+  leaseHash: string;
+}
+
+/** Server-owned upload metadata, separate from captured configuration. */
+export interface ResultIngestionMetadata {
+  name?: string;
+  description?: string;
+  source: TestSource;
+}
+
+/** Receipt returned only after required result artifacts have been committed. */
+export interface IngestResult {
+  testId: string;
+  zipKey: string;
+  contentRating: ContentRating;
+  duplicate: boolean;
+  publicationState: 'committed';
+  originalZipKey?: string;
+  originalZipSize?: number;
+  files: Record<string, StoredArtifact>;
+}
+
 // Config.json structure from Telescope test archives
 // Matches SavedConfig from telescope/src/types.ts
 export interface ConfigJson {
@@ -80,6 +117,17 @@ export type Tests = {
   name: string | null;
   description: string | null;
   content_rating: string;
+  publication_state?: PublicationState;
+  visibility?: ResultVisibility;
+  execution_status?: string;
+  run_type?: 'single' | 'scenario';
+  step_count?: number;
+  core_test_id?: string | null;
+  artifact_prefix?: string | null;
+  artifact_manifest?: string | null;
+  original_zip_key?: string | null;
+  ingestion_error?: string | null;
+  ingestion_expires_at?: number | null;
 };
 
 // Upload type into D1
@@ -92,4 +140,10 @@ export interface TestConfig {
   url: string;
   testDate: number;
   browser: string;
+  publicationState?: PublicationState;
+  visibility?: ResultVisibility;
+  executionStatus?: string;
+  runType?: 'single' | 'scenario';
+  stepCount?: number;
+  coreTestId?: string;
 }

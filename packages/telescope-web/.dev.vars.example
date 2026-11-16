@@ -10,3 +10,29 @@
 
 ENABLE_AI_RATING=false
 
+# Optional original-ZIP forwarding. Configure secrets through deployment secret
+# storage in hosted environments; never commit actual tokens or private URLs.
+# Set ENABLED=true and a URL to enable. The Worker scheduled processor reconciles
+# the outbox; upload-request wake-ups only reduce initial delivery latency.
+UPLOAD_FORWARD_ENABLED=false
+# UPLOAD_FORWARD_URL=https://receiver.example/api/upload
+# UPLOAD_FORWARD_LABEL=Secondary Telescope instance
+# TELESCOPE_INSTANCE_ID=replace_with_a_stable_instance_id
+# UPLOAD_FORWARD_MODE=http
+# UPLOAD_FORWARD_BEARER_TOKEN=replace_with_a_scoped_receiver_token
+# UPLOAD_FORWARD_PEER_SECRET=replace_with_a_long_shared_peer_secret
+# UPLOAD_FORWARD_SCHEDULER_TOKEN=replace_with_a_separate_scheduler_token
+# TELESCOPE_INSTANCE_ORIGINS=https://telescope.example,https://telescope-internal.example
+# UPLOAD_FORWARD_TIMEOUT_MS=15000
+# UPLOAD_FORWARD_MAX_ATTEMPTS=6
+# UPLOAD_FORWARD_MAX_AGE_MS=86400000
+# UPLOAD_FORWARD_MAX_ARCHIVE_BYTES=33554432
+# UPLOAD_FORWARD_MAX_SPOOL_BYTES=1073741824
+# UPLOAD_FORWARD_FAILED_RETENTION_MS=86400000
+# UPLOAD_FORWARD_ACCEPTED_RETENTION_MS=0
+# UPLOAD_FORWARD_CONFIG_VERSION=1
+# Local/private destinations require both explicit exceptions when applicable.
+# Runtime networking policy must also permit the configured destination.
+# UPLOAD_FORWARD_ALLOW_HTTP=true
+# UPLOAD_FORWARD_ALLOW_PRIVATE=true
+

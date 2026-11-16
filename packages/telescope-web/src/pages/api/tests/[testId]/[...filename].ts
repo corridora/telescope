@@ -39,7 +39,38 @@ export const GET: APIRoute = async (context: APIContext) => {
   const key = `${testId}/${normalizedFilename}`;
   try {
     const r2Start = Date.now();
-    const object = await env.RESULTS_BUCKET.get(key);
+    const rangeHeader = context.request.headers.get('Range');
+    let range: { offset: number; length: number } | undefined;
+    let fullSize: number | undefined;
+    if (rangeHeader) {
+      const metadata = await env.RESULTS_BUCKET.head(key);
+      if (!metadata) return new Response('File not found', { status: 404 });
+      fullSize = metadata.size;
+      const match = /^bytes=(\d+)-(\d*)$/.exec(rangeHeader);
+      const offset = match ? Number(match[1]) : -1;
+      const end = match?.[2] ? Number(match[2]) : fullSize - 1;
+      if (
+        !match ||
+        !Number.isSafeInteger(offset) ||
+        !Number.isSafeInteger(end) ||
+        offset < 0 ||
+        offset >= fullSize ||
+        end < offset
+      ) {
+        return new Response('Invalid byte range', {
+          status: 416,
+          headers: {
+            'Content-Range': `bytes */${fullSize}`,
+            'Cache-Control': 'no-store',
+          },
+        });
+      }
+      range = { offset, length: Math.min(end, fullSize - 1) - offset + 1 };
+    }
+    const object = await env.RESULTS_BUCKET.get(
+      key,
+      range ? { range } : undefined,
+    );
     const r2Duration = Date.now() - r2Start;
     console.log(`[R2] Fetch took ${r2Duration}ms - key: ${key}`);
     if (!object) {
@@ -60,7 +91,10 @@ export const GET: APIRoute = async (context: APIContext) => {
     // Security headers to prevent XSS execution
     const headers: Record<string, string> = {
       'Content-Type': contentType,
-      'Cache-Control': 'public, max-age=31536000, immutable',
+      'Cache-Control': context.locals.isAdmin
+        ? 'private, no-store'
+        : 'public, max-age=31536000, immutable',
+      'Accept-Ranges': 'bytes',
       'X-Content-Type-Options': 'nosniff', // can't execute as code
       'Content-Security-Policy':
         "default-src 'none'; style-src 'unsafe-inline'; sandbox", // allows inline css only, other files in sandbox
@@ -74,7 +108,14 @@ export const GET: APIRoute = async (context: APIContext) => {
       headers['Content-Disposition'] =
         `attachment; filename="${normalizedFilename}"`;
     }
-    return new Response(object.body, { headers });
+    if (range && fullSize !== undefined) {
+      headers['Content-Range'] =
+        `bytes ${range.offset}-${range.offset + range.length - 1}/${fullSize}`;
+      headers['Content-Length'] = String(range.length);
+    } else {
+      headers['Content-Length'] = String(object.size);
+    }
+    return new Response(object.body, { headers, status: range ? 206 : 200 });
   } catch (error) {
     console.error(
       `[R2] Fetch error - key: ${key}, testId: ${testId}, file: ${normalizedFilename}`,

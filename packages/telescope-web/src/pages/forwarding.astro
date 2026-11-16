@@ -1,0 +1,226 @@
+---
+import { env } from 'cloudflare:workers';
+
+import Page from '@/layouts/Page.astro';
+import { getBindingString, isAdminRequest } from '@/lib/auth';
+import { forwardingEnabled } from '@/lib/forwarding/service';
+
+export const prerender = false;
+
+const authenticated = await isAdminRequest(Astro.request, env);
+const configured = !!getBindingString(env, 'TELESCOPE_ADMIN_TOKEN');
+const enabled = forwardingEnabled(env);
+const destinationLabel = getBindingString(env, 'UPLOAD_FORWARD_LABEL') ?? 'Configured destination';
+Astro.response.headers.set('Cache-Control', 'private, no-store');
+---
+
+<Page title="ZIP forwarding">
+  <header class="forward-header">
+    <div>
+      <h1>ZIP forwarding</h1>
+      <p>Local results stay on this instance. Forwarding sends an additional copy of the original uploaded ZIP.</p>
+    </div>
+    <a href="/upload" class="button">Upload a result</a>
+  </header>
+
+  <p class:list={['configuration', { enabled }]}>
+    <strong>{enabled ? 'Enabled' : 'Disabled'}</strong>
+    {enabled ? ` — ${destinationLabel}` : ' — Configure UPLOAD_FORWARD_URL on the server to enable delivery.'}
+  </p>
+
+  {!authenticated && (
+    <form id="forward-login" class="panel login">
+      <h2>Administrator access</h2>
+      <p>{configured ? 'Sign in to inspect or control delivery.' : 'Configure TELESCOPE_ADMIN_TOKEN on the instance first.'}</p>
+      <label for="admin-token">Administrator token</label>
+      <input id="admin-token" name="token" type="password" required autocomplete="current-password" disabled={!configured} />
+      <button type="submit" disabled={!configured}>Sign in</button>
+    </form>
+  )}
+
+  <p id="forward-error" role="alert" hidden></p>
+
+  {authenticated && (
+    <section id="forward-workspace" data-authenticated="true">
+      <div class="toolbar">
+        <p id="forward-summary" aria-live="polite">Loading delivery state…</p>
+        <button id="refresh-forwarding" type="button">Refresh</button>
+        <button id="process-forwarding" type="button">Process due delivery</button>
+      </div>
+      <p class="note">“Accepted” confirms the destination's HTTP contract. It does not imply remote storage unless a Telescope receipt explicitly confirms it. Automatic retries require the instance's scheduled processor.</p>
+      <div id="forward-deliveries" aria-live="polite"></div>
+    </section>
+  )}
+</Page>
+
+<script>
+  interface Delivery {
+    deliveryId: string;
+    testId: string;
+    destinationLabel: string;
+    state: string;
+    attemptCount: number;
+    createdAt: string;
+    updatedAt: string;
+    nextAttemptAt: string | null;
+    sourceExpiresAt: string;
+    lastStatus: number | null;
+    error: string | null;
+    retryAvailable: boolean;
+    cancellationRequested: boolean;
+    receipt: { durableStorageConfirmed: boolean; remoteTestId?: string; remoteResultUrl?: string } | null;
+  }
+
+  const errorBox = document.getElementById('forward-error') as HTMLParagraphElement;
+  function showError(message = '') {
+    errorBox.textContent = message;
+    errorBox.hidden = !message;
+  }
+  async function request<T = unknown>(path: string, options: RequestInit = {}): Promise<T> {
+    const response = await fetch(path, options);
+    const data: unknown = await response.json();
+    if (!response.ok) {
+      const error = data && typeof data === 'object' ? Reflect.get(data, 'error') : undefined;
+      throw new Error(typeof error === 'string' ? error : 'The request failed');
+    }
+    return data as T;
+  }
+  document.getElementById('forward-login')?.addEventListener('submit', async event => {
+    event.preventDefault();
+    const token = (document.getElementById('admin-token') as HTMLInputElement).value;
+    try {
+      await request('/api/session', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }),
+      });
+      window.location.reload();
+    } catch (error) { showError((error as Error).message); }
+  });
+
+  function element(tag: string, text: string, className?: string) {
+    const node = document.createElement(tag);
+    node.textContent = text;
+    if (className) node.className = className;
+    return node;
+  }
+  function date(value: string) { return new Date(value).toLocaleString(); }
+
+  async function action(deliveryId: string, name: string) {
+    showError();
+    try {
+      await request(`/api/forwarding/${name}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deliveryId }),
+      });
+      await refresh();
+    } catch (error) { showError((error as Error).message); }
+  }
+
+  function render(delivery: Delivery): HTMLElement {
+    const card = element('article', '', 'delivery panel');
+    const heading = element('div', '', 'delivery-heading');
+    const link = document.createElement('a');
+    link.href = `/results/${encodeURIComponent(delivery.testId)}`;
+    link.textContent = delivery.testId;
+    heading.append(link, element('span', delivery.state.replaceAll('_', ' '), `state ${delivery.state}`));
+    card.append(heading, element('p', delivery.destinationLabel));
+    card.append(element('p', `${delivery.attemptCount} attempt(s) · Updated ${date(delivery.updatedAt)}`, 'note'));
+    if (delivery.nextAttemptAt) card.append(element('p', `Next attempt: ${date(delivery.nextAttemptAt)}`, 'note'));
+    card.append(element('p', `Original ZIP expires: ${date(delivery.sourceExpiresAt)}`, 'note'));
+    if (delivery.error) card.append(element('p', delivery.error, 'delivery-error'));
+    if (delivery.cancellationRequested) card.append(element('p', 'Cancellation requested; an in-flight destination may already have received the bytes.', 'note'));
+    if (delivery.receipt) {
+      card.append(element('p', delivery.receipt.durableStorageConfirmed
+        ? 'The destination receipt confirms committed storage.' : 'The destination accepted the request; remote storage is not confirmed.'));
+    }
+    const controls = element('div', '', 'controls');
+    const buttons: Array<[string, string]> = [];
+    if (delivery.retryAvailable && ['failed', 'cancelled'].includes(delivery.state)) buttons.push(['Retry', 'retry']);
+    if (delivery.retryAvailable && delivery.state === 'paused') buttons.push(['Resume', 'resume']);
+    if (['pending', 'retrying', 'waiting_review'].includes(delivery.state)) buttons.push(['Pause', 'pause']);
+    if (['pending', 'retrying', 'waiting_review', 'paused', 'sending'].includes(delivery.state) && !delivery.cancellationRequested) buttons.push(['Cancel', 'cancel']);
+    for (const [label, name] of buttons) {
+      const button = element('button', label) as HTMLButtonElement;
+      button.type = 'button';
+      button.addEventListener('click', async () => {
+        button.disabled = true;
+        await action(delivery.deliveryId, name);
+        button.disabled = false;
+      });
+      controls.append(button);
+    }
+    card.append(controls);
+    const details = document.createElement('details');
+    const summary = element('summary', 'Attempt history');
+    const history = element('div', '', 'history');
+    details.append(summary, history);
+    details.addEventListener('toggle', async () => {
+      if (!details.open || history.childElementCount) return;
+      try {
+        const data = await request<{ attempts: Array<{ sequence: number; startedAt: string; outcome: string; status: number | null; error: string | null }> }>(`/api/forwarding/history?deliveryId=${encodeURIComponent(delivery.deliveryId)}`);
+        for (const attempt of data.attempts) {
+          history.append(element('p', `${attempt.sequence}. ${date(attempt.startedAt)} — ${attempt.outcome}${attempt.status ? ` (HTTP ${attempt.status})` : ''}${attempt.error ? `: ${attempt.error}` : ''}`));
+        }
+        if (!data.attempts.length) history.append(element('p', 'No transfer attempts yet.'));
+      } catch (error) { history.append(element('p', (error as Error).message)); }
+    });
+    card.append(details);
+    return card;
+  }
+
+  let refreshing = false;
+  async function refresh() {
+    const container = document.getElementById('forward-deliveries');
+    if (!container || refreshing) return;
+    refreshing = true;
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const test = params.get('testId');
+      const [data, counts] = await Promise.all([
+        request<{ deliveries: Delivery[] }>(`/api/forwarding/list${test ? `?testId=${encodeURIComponent(test)}` : ''}`),
+        request<{ states: Array<{ retainedBytes: number }> }>('/api/forwarding/summary'),
+      ]);
+      const deliveries = data.deliveries;
+      const summary = document.getElementById('forward-summary')!;
+      const retained = counts.states.reduce((total: number, item: { retainedBytes: number }) => total + item.retainedBytes, 0);
+      summary.textContent = `${deliveries.length} recent deliveries · ${(retained / 1024 / 1024).toFixed(1)} MiB retained`;
+      container.replaceChildren(...deliveries.map(render));
+      if (!deliveries.length) container.append(element('p', 'No forwarding deliveries have been scheduled.', 'panel'));
+    } catch (error) { showError((error as Error).message); }
+    finally { refreshing = false; }
+  }
+  document.getElementById('refresh-forwarding')?.addEventListener('click', () => { void refresh(); });
+  document.getElementById('process-forwarding')?.addEventListener('click', async event => {
+    const button = event.currentTarget as HTMLButtonElement;
+    button.disabled = true;
+    try { await request('/api/forwarding/process', { method: 'POST' }); await refresh(); }
+    catch (error) { showError((error as Error).message); }
+    finally { button.disabled = false; }
+  });
+  if (document.getElementById('forward-workspace')) {
+    void refresh();
+    window.setInterval(() => { if (!document.hidden) void refresh(); }, 10_000);
+  }
+</script>
+
+<style>
+  .forward-header, .toolbar, .delivery-heading, .controls { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
+  .forward-header, .delivery-heading { justify-content: space-between; }
+  .forward-header p { max-width: 54rem; }
+  .panel { padding: 1.25rem; border: 1px solid var(--border-color, #7775); border-radius: 0.75rem; margin: 1rem 0; }
+  .login { max-width: 34rem; display: grid; gap: 0.75rem; }
+  input, button, .button { padding: 0.6rem 0.85rem; border: 1px solid #7776; border-radius: 0.4rem; font: inherit; }
+  input { color: inherit; background: transparent; }
+  button, .button { cursor: pointer; color: inherit; background: var(--bg-secondary, #7771); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .configuration { padding: 0.85rem 1rem; background: #7772; border-radius: 0.5rem; }
+  .configuration.enabled { border-left: 4px solid #298558; }
+  .state { padding: 0.25rem 0.6rem; border-radius: 0.4rem; background: #7772; }
+  .state.accepted { background: #29855822; }
+  .state.failed, .state.blocked, .state.expired { background: #b4333322; }
+  .note { font-size: 0.9rem; opacity: 0.8; }
+  .delivery-error, #forward-error { color: var(--error-color, #c34b45); }
+  #forward-error { border: 1px solid currentColor; padding: 0.75rem; border-radius: 0.5rem; }
+  summary { cursor: pointer; margin-top: 1rem; }
+  .history { font-size: 0.9rem; overflow-wrap: anywhere; }
+  .delivery-heading a { overflow-wrap: anywhere; }
+</style>
