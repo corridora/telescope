@@ -171,6 +171,17 @@ export type SimplifiedBrowserConfigOptions = Omit<
  */
 export interface LaunchOptions {
   url: string;
+  /** Persistent output root, resolved against the caller's working directory. */
+  resultsDir?: string;
+  /** Override the environment-derived browser display setting. */
+  headless?: boolean;
+  /** Cancels browser execution while preserving available output. */
+  signal?: AbortSignal;
+  /** Receives lifecycle updates; never serialized into captured configuration. */
+  onProgress?: (progress: RunProgress) => void;
+  /** Trusted local ESM module path or in-process script definition. */
+  script?: string | TestScript;
+  scriptTimeout?: number;
   baseline?: boolean;
   browser?: BrowserName;
   headers?: Record<string, string>;
@@ -207,6 +218,7 @@ export interface LaunchOptions {
  * Default options type (subset of LaunchOptions that have defaults)
  */
 export interface DefaultOptions {
+  resultsDir: string;
   baseline: boolean;
   browser: BrowserName;
   width?: number;
@@ -251,6 +263,185 @@ export interface SuccessfulTestResult {
 export interface FailedTestResult {
   success: false;
   error: string;
+  testId?: string;
+  resultsPath?: string;
+}
+
+/** Browser execution phases, independent from delivery and display policy. */
+export type RunPhase =
+  | 'validating'
+  | 'launching'
+  | 'running'
+  | 'capturing'
+  | 'finalizing'
+  | 'complete';
+
+/** A lifecycle event emitted by an executing capture. */
+export interface RunProgress {
+  testId: string;
+  resultsPath: string;
+  phase: RunPhase;
+  timestamp: string;
+}
+
+/** Capture outcomes; storage publication and network delivery are separate. */
+export type RunStatus =
+  | 'running'
+  | 'passed'
+  | 'failed'
+  | 'cancelled'
+  | 'interrupted'
+  | 'dry';
+
+/** Integrity information for an artifact relative to its capture directory. */
+export interface ArtifactDescriptor {
+  size: number;
+  sha256: string;
+}
+
+/** Versioned portable capture identity and outcome in result.json. */
+export interface ResultManifest {
+  schemaVersion: 1;
+  testId: string;
+  status: RunStatus;
+  startedAt: string;
+  finishedAt?: string;
+  error?: string;
+  artifacts: Record<string, ArtifactDescriptor>;
+}
+
+/** Options for the installed, filesystem-backed local workspace. */
+export interface LocalServerOptions {
+  host?: string;
+  port?: number;
+  resultsDir?: string;
+  open?: boolean;
+}
+
+/** Outbound remote agent configuration; targets are explicitly allowlisted. */
+export interface AgentOptions {
+  controller: string;
+  tokenFile: string;
+  spoolDir?: string;
+  name?: string;
+  pollInterval?: number;
+  allowHosts?: string[];
+  signal?: AbortSignal;
+}
+
+/** Portable identity for legacy archives without a capture manifest. */
+export interface IdentityManifest {
+  schemaVersion: 1;
+  testId: string;
+}
+
+/** Values supplied to trusted, local Playwright step callbacks. */
+export interface ScriptContext {
+  page: Page;
+  context: BrowserContext;
+  url: string;
+}
+
+export type ScriptStepKind = 'navigation' | 'interaction';
+
+/** One measured action, with explicit browser readiness defined by its callback. */
+export interface ScriptStep {
+  name: string;
+  kind: ScriptStepKind;
+  timeout?: number;
+  run: (context: ScriptContext) => Promise<void>;
+}
+
+/** A trusted script can perform unmeasured setup before its known steps. */
+export interface TestScript {
+  name?: string;
+  setup?: (context: ScriptContext) => Promise<void>;
+  steps: ScriptStep[];
+}
+
+export type ScenarioStepStatus =
+  | 'pending'
+  | 'running'
+  | 'passed'
+  | 'failed'
+  | 'skipped'
+  | 'cancelled';
+
+/** Serializable outcome for an individual measured interval. */
+export interface ScenarioStepResult {
+  id: string;
+  order: number;
+  name: string;
+  kind: ScriptStepKind;
+  status: ScenarioStepStatus;
+  artifactBase: string;
+  metricScope: 'navigation' | 'interval';
+  startingUrl?: string;
+  endingUrl?: string;
+  startOffsetMs?: number;
+  durationMs?: number;
+  documentTimeOrigin?: number;
+  error?: string;
+  artifacts?: Record<string, ArtifactDescriptor>;
+}
+
+/** Shared multi-step artifact contract, independent of execution transport. */
+export interface ScenarioManifest {
+  schemaVersion: 1;
+  name?: string;
+  status: RunStatus;
+  startedAt: string;
+  finishedAt?: string;
+  durationMs: number;
+  error?: string;
+  coverStepId?: string;
+  video?: { path: string; startOffsetMs: number };
+  steps: ScenarioStepResult[];
+}
+
+export type LocalJobStatus =
+  | 'queued'
+  | 'running'
+  | 'finalizing'
+  | 'passed'
+  | 'failed'
+  | 'cancelled'
+  | 'interrupted';
+
+/** Durable local execution state; callbacks and secrets are never presets. */
+export interface LocalJob {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  status: LocalJobStatus;
+  options: LaunchOptions;
+  testId?: string;
+  resultsPath?: string;
+  error?: string;
+  progress?: RunProgress;
+}
+
+/** Reusable named configuration, independent from immutable run snapshots. */
+export interface LocalDefinition {
+  id: string;
+  name: string;
+  description?: string;
+  options: LaunchOptions;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Capture metadata used to browse the local result library. */
+export interface LocalResultSummary {
+  testId: string;
+  url: string;
+  name?: string;
+  description?: string;
+  browser?: string;
+  date: string;
+  status: string;
+  hasScreenshot: boolean;
+  scenario?: unknown;
 }
 
 /**
@@ -540,6 +731,8 @@ export interface TestPaths {
  * Saved configuration in results directory
  */
 export interface SavedConfig {
+  schemaVersion?: 1;
+  testId?: string;
   url: string;
   date: string;
   options: LaunchOptions;
@@ -843,6 +1036,9 @@ declare global {
  * the options on to `normalizeCLIConfig` / `launchTest`.
  */
 export interface CLIOptions {
+  resultsDir?: string;
+  script?: string;
+  scriptTimeout?: number;
   url?: string;
   baseline?: boolean;
   browser?: string;

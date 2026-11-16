@@ -6,6 +6,10 @@
   "types": "dist/src/index.d.ts",
   "type": "module",
   "exports": {
+    "./contracts": {
+      "types": "./dist/src/contracts.d.ts",
+      "import": "./dist/src/contracts.js"
+    },
     ".": {
       "import": {
         "types": "./dist/src/index.d.ts",

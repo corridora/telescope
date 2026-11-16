@@ -6,6 +6,7 @@ import type { DefaultOptions } from './types.js';
  * Single source of truth prevents defaults from drifting between interfaces.
  */
 export const DEFAULT_OPTIONS: DefaultOptions = {
+  resultsDir: './results',
   // Run Baseline compatibility analysis
   baseline: false,
   // Browser engine to use for testing
