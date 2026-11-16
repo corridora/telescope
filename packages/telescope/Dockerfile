@@ -1,81 +1,51 @@
-FROM --platform=linux/amd64 node:24-bookworm
+# syntax=docker/dockerfile:1
+# Build from the repository root:
+# docker build --platform linux/amd64 -f packages/telescope/Dockerfile -t telescope .
+FROM node:24-bookworm
 
-ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ARG TARGETARCH
+ARG PLAYWRIGHT_VERSION=1.61.1
 
-# Install system dependencies for Playwright browsers, ffmpeg, and throttling
-RUN apt-get update && apt-get install -y \
-    ffmpeg \
-    iproute2 \
-    kmod \
-    sudo \
-    # Chromium/Firefox dependencies
-    libnss3 \
-    libnspr4 \
-    libatk1.0-0 \
-    libatk-bridge2.0-0 \
-    libcups2 \
-    libdrm2 \
-    libxkbcommon0 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxfixes3 \
-    libxrandr2 \
-    libgbm1 \
-    libasound2 \
-    libpango-1.0-0 \
-    libcairo2 \
-    libatspi2.0-0 \
-    # Firefox dependencies
-    libgtk-3-0 \
-    # WebKit dependencies
-    libgstreamer1.0-0 \
-    libgtk-4-1 \
-    libgraphene-1.0-0 \
-    libwoff1 \
-    libgstreamer-plugins-base1.0-0 \
-    libgstreamer-gl1.0-0 \
-    libgstreamer-plugins-bad1.0-0 \
-    libavif15 \
-    libharfbuzz-icu0 \
-    libenchant-2-2 \
-    libsecret-1-0 \
-    libhyphen0 \
-    libmanette-0.2-0 \
-    && rm -rf /var/lib/apt/lists/*
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    HEADLESS=true \
+    RUNNING_IN_DOCKER=true
 
-# Create non-root user for running Chrome securely (with sandbox enabled)
-RUN groupadd -r telescope && useradd -r -g telescope -G audio,video telescope \
-    && mkdir -p /home/telescope ${PLAYWRIGHT_BROWSERS_PATH} \
-    && chown -R telescope:telescope /home/telescope ${PLAYWRIGHT_BROWSERS_PATH}
-
-RUN echo "telescope ALL=(ALL) NOPASSWD: /sbin/tc, /sbin/ip, /usr/sbin/tc, /usr/sbin/ip, /bin/ip, /usr/bin/ip, /sbin/modprobe, /usr/sbin/modprobe" >> /etc/sudoers
-
-# Set working directory
 WORKDIR /app
 
-# Copy package files
+# Chrome, Chrome Beta, and Edge require Linux AMD64 in this image.
+RUN if [ "$TARGETARCH" != "amd64" ]; then \
+      echo 'This browser image supports linux/amd64. Build with --platform linux/amd64.' >&2; \
+      exit 1; \
+    fi
+
+# Include workspace manifests so npm can resolve the monorepo root lockfile.
 COPY package.json package-lock.json ./
+COPY packages/telescope/package.json packages/telescope/package.json
+COPY packages/telescope-web/package.json packages/telescope-web/package.json
+COPY packages/waterfall/package.json packages/waterfall/package.json
 
-# Install dependencies (this runs postinstall which installs Playwright browsers)
-RUN npm ci
+# Browser installation is explicit below; lifecycle scripts must not download
+# another browser revision or build an unrelated workspace.
+RUN npm ci --ignore-scripts --workspace packages/telescope --include-workspace-root
 
-# Install Chrome, Chrome Beta, and Edge via Playwright
-# Note: Chrome Canary is not available on Linux
-RUN npx playwright install chrome chrome-beta msedge
+COPY LICENSE ./LICENSE
+COPY packages/telescope/ packages/telescope/
 
-# Copy the rest of the application
-COPY . .
+# Keep browser binaries aligned with all Playwright packages and the CI image.
+RUN node -e "for (const name of ['playwright', 'playwright-webkit', '@playwright/test']) { const version = require(name + '/package.json').version; if (version !== process.argv[1]) throw new Error(name + ' version ' + version + ' must match ' + process.argv[1]); }" "$PLAYWRIGHT_VERSION" \
+    && npx --no-install playwright install --with-deps chromium firefox webkit chrome chrome-beta msedge
 
-# Build TypeScript
-RUN npm run build
+# Traffic-shaping tools are only usable through the optional Linux profile.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg iproute2 kmod sudo ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm run build --workspace packages/telescope \
+    && npm prune --omit=dev --ignore-scripts --workspace packages/telescope --include-workspace-root \
+    && mkdir -p /app/results /app/tmp \
+    && chown node:node /app/results /app/tmp \
+    && chmod -R a+rX "$PLAYWRIGHT_BROWSERS_PATH"
 
-# Create results directory and set ownership for non-root user
-RUN mkdir -p /app/results /app/tmp /app/recordings \
-    && chown -R telescope:telescope /app ${PLAYWRIGHT_BROWSERS_PATH}
+USER node
 
-# Switch to non-root user for running Chrome with sandbox enabled
-USER telescope
-
-# Default command - show help
-ENTRYPOINT ["node", "dist/src/cli.js"]
+ENTRYPOINT ["node", "/app/packages/telescope/dist/src/cli.js"]
 CMD ["--help"]

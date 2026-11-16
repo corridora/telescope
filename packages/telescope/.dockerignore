@@ -1,3 +1,5 @@
+# The supported image uses the repository-root context and /.dockerignore.
+# These exclusions also protect accidental package-directory contexts.
 # Dependencies
 node_modules/
 
@@ -23,3 +25,12 @@ tests/
 # Documentation
 *.md
 *.org
+
+# Credentials and local configuration
+.env
+.env.*
+.dev.vars
+.dev.vars.*
+.npmrc
+*.pem
+*.key

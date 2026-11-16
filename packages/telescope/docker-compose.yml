@@ -1,17 +1,30 @@
+x-telescope: &telescope
+  build:
+    context: ../..
+    dockerfile: packages/telescope/Dockerfile
+  platform: linux/amd64
+  init: true
+  shm_size: 1gb
+  security_opt:
+    - seccomp=./docker/seccomp_profile.json
+  volumes:
+    - ./results:/app/results
+  environment:
+    HEADLESS: 'true'
+    RUNNING_IN_DOCKER: 'true'
+  stop_grace_period: 30s
+
 services:
   telescope:
-    build: .
-    volumes:
-      # Mount results directory to persist test results
-      - ./results:/app/results
-    # Required for Playwright browsers to run properly
-    ipc: host
-    # Security options needed for browser sandboxing
-    security_opt:
-      - seccomp=unconfined
+    <<: *telescope
+
+  # Native Linux only. Load ifb on the host before enabling this profile.
+  telescope-throttled:
+    <<: *telescope
+    profiles: [throttling]
+    user: '0:0'
     cap_add:
       - NET_ADMIN
-    environment:
-      # Run browsers in headless mode (required for Docker without display)
-      - HEADLESS=true
-      - RUNNING_IN_DOCKER=true
+    volumes:
+      - ./results:/app/results
+      - /lib/modules:/lib/modules:ro

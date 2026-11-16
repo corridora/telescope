@@ -216,26 +216,70 @@ telescope -u https://www.example.com -b firefox \
 
 ## Docker
 
-Build and run telescope in a container:
+Build and run from the repository root. The image uses the root lockfile and
+builds only the Telescope workspace:
 
 ```bash
 # Build
-docker compose build
+docker compose -f packages/telescope/docker-compose.yml build telescope
 
 # Run a test
-docker compose run --rm telescope -u https://example.com -b chrome
+docker compose -f packages/telescope/docker-compose.yml run --rm telescope \
+  https://example.com -b chrome
 
-# Run with network throttling
-docker compose run --rm telescope -u https://example.com -b chrome --connectionType 3g
-
-# Results are saved to ./results/
+# Results are saved to packages/telescope/results/ on the host.
 ```
 
-Supports: Chrome, Chrome Beta, Edge, Firefox, and Safari (WebKit).
+You can also build the CLI image directly:
+
+```bash
+docker build --platform linux/amd64 -f packages/telescope/Dockerfile -t telescope .
+mkdir -p results
+docker run --rm --init --shm-size=1g \
+  --security-opt seccomp=packages/telescope/docker/seccomp_profile.json \
+  --mount type=bind,src="${PWD}/results",dst=/app/results \
+  telescope https://example.com -b firefox
+```
+
+The image targets **Linux AMD64** and installs the browser revisions associated
+with the lockfile's Playwright version: Chromium, Chrome, Chrome Beta, Edge,
+Firefox, and WebKit. The `safari` option selects Playwright WebKit; the image does
+not contain native macOS Safari or Chrome Canary. ARM hosts need AMD64 emulation;
+emulated performance measurements should not be compared with native runs as if
+the execution environments were identical.
+
+Compose runs as the image's non-root `node` user (UID/GID 1000), enables process
+reaping, and provides 1 GB of shared memory. Ensure a bind-mounted results
+directory is writable by that user. The included seccomp profile permits the
+user namespaces used by Chromium's sandbox, following the
+[Playwright Docker guidance](https://playwright.dev/docs/docker). Ordinary runs
+need neither host networking nor `NET_ADMIN`, unconfined seccomp, or a Docker
+socket mount. Image builds and runtime checks must be run explicitly.
 
 ### Network Throttling Limitation
 
-Network throttling (`--connectionType`) requires OS-level traffic shaping via the Linux `ifb` kernel module. This works on native Linux machines but **does not work in Docker Desktop (Mac or Windows)**, because the Docker Desktop Linux VM does not include the required kernel module.
+Network throttling (`--connectionType`) requires native Linux traffic shaping,
+the host's `ifb` kernel module, and `NET_ADMIN`. Enable it explicitly through the
+separate `throttling` profile after loading the module on the Docker host:
+
+```bash
+# Run on the native Linux Docker host, not inside the container.
+sudo modprobe ifb
+
+docker compose -f packages/telescope/docker-compose.yml --profile throttling \
+  run --rm telescope-throttled https://example.com -b chrome --connectionType 3g
+```
+
+The throttled service runs as root, adds only the requested network capability,
+and mounts host kernel modules read-only. Its browser sandbox behavior differs
+from the default non-root service. Check results-directory ownership after a
+root-run capture before switching back to the normal service. No `SYS_MODULE`
+capability is granted; the module must already be loaded on the host.
+
+The current throttling implementation does **not support Docker Desktop** on
+macOS or Windows. Use the ordinary service without `--connectionType` there.
+See [docker/README.md](docker/README.md) for runtime configuration and the sandbox
+profile's upstream source.
 
 ## Installation
 
